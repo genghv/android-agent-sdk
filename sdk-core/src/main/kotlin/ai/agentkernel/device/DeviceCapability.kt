@@ -37,6 +37,22 @@ interface DeviceCapability {
     val usage: String
 
     /**
+     * **短用法** —— 只说「这条命令能干什么」，不列完整参数形态。
+     *
+     * ## 为什么要有两个
+     *
+     * 有些能力（`agent-memory` 那种带七八个子命令的）完整用法一行就上百字符，
+     * 而**提示词的「核心模式」存在的意义就是省预算** —— 装进网关那 2000 字符里。
+     * 参数形态写详细了，核心模式直接装不下；删掉这条能力更糟（模型压根不知道它存在）。
+     *
+     * ⇒ 核心模式列**短用法**（知道有这条命令、知道大概干什么），
+     * 完整参数形态放技能文档里按需查；完整模式才列 [usage]。
+     *
+     * 默认就是 [usage] —— 简单的能力不需要短版本。
+     */
+    val shortUsage: String get() = usage
+
+    /**
      * 这条能力属于哪一组。
      *
      * - [CapabilityOrigin.TERMUX] —— 与 Termux:API 逐字对齐的标准命令；
@@ -119,8 +135,8 @@ class DeviceCapabilityRegistry(capabilities: List<DeviceCapability>) {
     fun describeLines(): List<String> = ordered.map { it.usage }
 
     /** 按来源分组的清单，供提示词分段落讲。 */
-    fun describeByOrigin(): Map<CapabilityOrigin, List<String>> =
-        ordered.groupBy { it.origin }.mapValues { (_, v) -> v.map { it.usage } }
+    fun describeByOrigin(short: Boolean = false): Map<CapabilityOrigin, List<String>> =
+        ordered.groupBy { it.origin }.mapValues { (_, v) -> v.map { if (short) it.shortUsage else it.usage } }
 
     /**
      * 整条命令**就是**一个能力调用吗？

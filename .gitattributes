@@ -3,9 +3,15 @@
 # CRLF and the launcher dies on Linux/macOS with "bad interpreter".
 * text=auto eol=lf
 
-# Windows launchers must stay CRLF.
-*.bat text eol=crlf
-*.cmd text eol=crlf
+# Windows launchers must stay CRLF -- and are stored VERBATIM (not normalized
+# to LF). Two reasons:
+#   1. gradlew.bat contains goto/label, and cmd.exe mis-parses LF-only batch
+#      files (the classic "wrong line" symptom on Windows).
+#   2. Keeping them verbatim makes the release zip byte-identical to the repo
+#      blobs, so the published package can be checked against the repo with a
+#      plain sha1 comparison -- zero differences, no exceptions.
+*.bat -text
+*.cmd -text
 
 # Binary payloads (not tracked today, but be explicit).
 *.zip binary

@@ -19,6 +19,7 @@ import ai.agentkernel.prompt.AgentSystemPrompt
 import ai.agentkernel.prompt.ShellCommandInventory
 import ai.agentkernel.protocol.ChatMessage
 import ai.agentkernel.protocol.SystemMessage
+import ai.agentkernel.text.AgentTextCapabilities
 import ai.agentkernel.tools.Tool
 import ai.agentkernel.tools.ToolRegistry
 import ai.agentkernel.tools.exec.CommandExecutor
@@ -26,6 +27,7 @@ import ai.agentkernel.tools.exec.ShellTool
 import ai.agentkernel.workspace.WorkspaceGuard
 import ai.agentkernel.workspace.WorkspacePolicy
 import android.content.Context
+import android.util.Log
 import kotlinx.serialization.json.JsonObject
 import java.io.File
 
@@ -56,7 +58,8 @@ import java.io.File
  *
  * - `systemPrompt = null`（默认）→ 用生成的；
  * - `systemPrompt = ""` → **不加**（你自己拼）；
- * - `systemPrompt = "…"` → 用你这段。
+ * - `systemPrompt = "…"` → 用你这段；
+ * - `promptFile = …` → 宿主自己的**提示词文件**（替代 [extraNotes]；读不到就退回 [extraNotes]）。
  *
  * 注意：history（含历史 / 压缩结果）仍由**调用方**拼好传入，这不是内核职责。
  */
@@ -183,6 +186,25 @@ class AndroidAgentSdk(
      * - 全部旋钮见 [ContextPolicy]（容量、保留长度、闲置时长、记忆预算……）。
      */
     memoryPolicy: ContextPolicy? = null,
+    /**
+     * 宿主自己的**提示词文件**（可选）。存在就从文件读，替代 [extraNotes]。
+     * 文件超长会被**截断并记一条日志**（提示词超限会被网关静默砍尾巴）。
+     *
+     * ## 为什么是「文件」而不是又一个字符串参数
+     *
+     * 宿主自己的提示词（网关地址、内部接口约定、房规…）通常**很长** ——
+     * 长到塞进源码里既难读又难改。所以给它一条路径，让宿主能自己维护那份文本。
+     *
+     * ## 三条规矩
+     *
+     * - **优先级**：`systemPrompt` > 提示词文件 > [extraNotes] ——
+     *   宿主自己拼的提示词是最终版，拼接它只会把提示词改坏；
+     * - **读不到不炸**：文件不存在 / 读不了 ⇒ 退回 [extraNotes]（少一段提示词而已）；
+     * - **超长会截**：上限是 [systemBudgetLimitChars] 的一半（默认 3000 字符），
+     *   截了会在 [SystemBudget.promptFileTruncated] 里**留痕** ——
+     *   因为提示词超限只会被网关**静默砍尾巴**，没人知道就等于没发生。
+     */
+    private val promptFile: File? = null,
 ) {
     private val tools = ToolRegistry(listOf(ShellTool(executor, capabilities = capabilities)))
 
@@ -195,13 +217,27 @@ class AndroidAgentSdk(
     private val memory: ContextMemory? = memory ?: memoryPolicy?.let { policy ->
         val layout = (executor as? AndroidCommandExecutor)?.layout
         if (layout == null) null
-        else ContextMemory(
-            llm = llm,
-            model = model,
-            store = MemoryStore(File(layout.varDir, MEMORY_DIR)),
-            policy = policy,
-            archive = ArchiveStore(File(layout.varDir, ARCHIVE_DIR)),
-        )
+        else {
+            // ★ 容量上限必须接到**真正写盘的那两个实例**上 ——
+            //   applyLimits 是实例内的**内存态**（不落盘），接在别的实例上等于没接。
+            //   下面这两个是唯一会被 ContextMemory 写进去的实例；
+            //   companion 里的 archiveStore(context) 是给宿主翻历史用的**另一个实例**（只读）。
+            val store = MemoryStore(File(layout.varDir, MEMORY_DIR))
+            store.applyLimits(
+                policy.memoryMaxEntryChars,
+                policy.memoryMaxTotalChars,
+                policy.maxMemoryEntries,
+            )
+            val archive = ArchiveStore(File(layout.varDir, ARCHIVE_DIR))
+            archive.applyLimits(policy.archiveMaxSegments, policy.archiveMaxChars)
+            ContextMemory(
+                llm = llm,
+                model = model,
+                store = store,
+                policy = policy,
+                archive = archive,
+            )
+        }
     }
 
     /**
@@ -368,6 +404,7 @@ class AndroidAgentSdk(
             memoryChars = parts.digestChars,
             summaryChars = parts.summaryChars,
             reservedSummaryChars = parts.summaryReserve,
+            promptFileTruncated = parts.promptFileTruncated,
         )
     }
 
@@ -401,7 +438,8 @@ class AndroidAgentSdk(
      * 而那种情况下不预留就一定超限。
      */
     private fun coordinatePrefix(limitChars: Int? = systemBudgetLimitChars): PrefixParts {
-        val prompt = resolveSystemPrompt()
+        val resolved = resolvePrompt()
+        val prompt = resolved.prompt
         val alert = workspaceGuard?.alert()
         val mem = memory
         val priorSummary = mem?.sessionSummary()
@@ -444,6 +482,7 @@ class AndroidAgentSdk(
             priorSummary = priorSummary,
             alert = alert,
             summaryReserve = summaryReserve,
+            promptFileTruncated = resolved.promptFileTruncated,
         )
     }
 
@@ -459,6 +498,8 @@ class AndroidAgentSdk(
         val alert: String?,
         /** 协调时为「会话摘要」预留的字符数（标题 + 摘要正文）。 */
         val summaryReserve: Int,
+        /** 提示词文件被截断了吗？（true = 只用了一部分） */
+        val promptFileTruncated: Boolean = false,
     ) {
         val promptChars: Int get() = prompt?.length ?: 0
         val digestChars: Int get() = digest?.length ?: 0
@@ -491,18 +532,75 @@ class AndroidAgentSdk(
     }
 
     /** 最终生效的系统提示词；`""` 表示不加。 */
-    fun resolveSystemPrompt(): String? {
-        systemPrompt?.let { return it.ifBlank { null } }
-        return buildSystemPrompt(
-            executor = executor,
-            capabilities = capabilities,
-            policy = workspaceGuard?.effectivePolicy()?.first ?: WorkspacePolicy(),
-            commandDetail = commandDetail,
-            extraNotes = extraNotes,
+    fun resolveSystemPrompt(): String? = resolvePrompt().prompt
+
+    /**
+     * 解析这一轮的提示词（连带「提示词文件被截断了没有」）。
+     *
+     * ## ★ 优先级（只有一条，别搞反）
+     *
+     * `systemPrompt`（宿主自己拼的）> **提示词文件** > `extraNotes`。
+     *
+     * - 宿主自己拼的提示词是**最终版** —— 往里再拼任何东西只会把它改坏；
+     * - 提示词文件是宿主自己的**长文本**，存在就顶替 [extraNotes]；
+     * - 都没有 ⇒ 用 [extraNotes]。
+     */
+    private fun resolvePrompt(): PromptResolution {
+        systemPrompt?.let { return PromptResolution(it.ifBlank { null }, promptFileTruncated = false) }
+        val notes = resolveHostNotes()
+        return PromptResolution(
+            prompt = buildSystemPrompt(
+                executor = executor,
+                capabilities = capabilities,
+                policy = workspaceGuard?.effectivePolicy()?.first ?: WorkspacePolicy(),
+                commandDetail = commandDetail,
+                extraNotes = notes.text,
+            ),
+            promptFileTruncated = notes.truncated,
         )
     }
 
+    /**
+     * 宿主补充说明的**最终形态**：提示词文件优先，其次 [extraNotes]。
+     *
+     * ★ **读不到不炸**：宿主给了个坏路径（没权限 / 还没生成）不该让整个 SDK 起不来 ——
+     *   退回 [extraNotes] 就行，提示词少一段而已。
+     * ★ **空文件等于没有**：否则一个刚创建的空文件会把宿主写好的 [extraNotes] 顶掉。
+     */
+    private fun resolveHostNotes(): HostNotes {
+        val file = promptFile ?: return HostNotes(extraNotes, truncated = false)
+        val raw = runCatching {
+            if (!file.isFile) null else file.readText()
+        }.getOrNull() ?: return HostNotes(extraNotes, truncated = false)
+        val text = raw.trim()
+        if (text.isEmpty()) return HostNotes(extraNotes, truncated = false)
+        // 截断上限 = system 上限的一半：提示词还要装设备提示词、摘要、告警，
+        // 给宿主一半是「它最多能占多少」的直观约定。
+        val limit = systemBudgetLimitChars?.div(2)
+        // limit <= 0 ⇒ 「不检查上限」⇒ 不截（截成空反而把内容丢了）。
+        if (limit == null || limit <= 0 || text.length <= limit) {
+            return HostNotes(text, truncated = false)
+        }
+        Log.w(LOG_TAG, "提示词文件超长（${text.length} 字符），已截到 $limit 字符：${file.name}")
+        return HostNotes(text.take(limit), truncated = true)
+    }
+
+    /** 提示词解析的结果（正文 + 「提示词文件被截断了没有」）。 */
+    private data class PromptResolution(
+        val prompt: String?,
+        val promptFileTruncated: Boolean,
+    )
+
+    /** 宿主补充说明的最终形态（正文 + 「被截断了没有」）。 */
+    private data class HostNotes(
+        val text: String,
+        val truncated: Boolean,
+    )
+
     companion object {
+        /** 日志 tag（本门面自己打的那几条警告）。 */
+        private const val LOG_TAG = "AgentKernelSdk"
+
         /** 记忆在 agent 私有根下的目录名（`<filesDir>/agent/var/memory/`）。 */
         const val MEMORY_DIR = "memory"
 
@@ -561,6 +659,25 @@ class AndroidAgentSdk(
             AgentMemoryCapabilities(
                 MemoryStore(File(PrefixLayout(context.filesDir.path).varDir, MEMORY_DIR))
             )
+
+        /**
+         * 文本编辑能力（`agent-text`）的工厂。
+         *
+         * 路径与 SDK 内部一致（agent 私有根）—— 理由和 [memoryCapabilities] 一样：
+         * 宿主自己拼路径的话，一旦改了 agent 根目录名就对不上，
+         * 对不上的后果是「agent 改的是 A 目录、宿主看的是 B 目录」。
+         *
+         * ```
+         * val caps = DeviceCapabilityRegistry(
+         *     defaultDeviceCapabilities(context, text = AndroidAgentSdk.textCapabilities(context))
+         * )
+         * ```
+         *
+         * ★ 沙箱根 = agent 私有根（含 `var/memory/`、`var/archive/`）。
+         * 这条能力**只在这个根下面**生效，`..`、绝对路径、符号链接逃逸一律拒绝。
+         */
+        fun textCapabilities(context: Context): AgentTextCapabilities =
+            AgentTextCapabilities(File(PrefixLayout(context.filesDir.path).agentRoot))
 
         /** 会话摘要进前缀时的标题。 */
         private const val SUMMARY_HEADER = "## 之前的对话摘要（压缩后的历史）\n"
@@ -678,6 +795,7 @@ class AndroidAgentSdk(
  * @param summaryChars 会话摘要（标题 + 正文）的字符数。
  * @param reservedSummaryChars 协调时为「会话摘要」**预留**的字符数
  *   （摘要可能这一轮才出现，所以要提前留位）。
+ * @param promptFileTruncated 提示词文件被截断了吗？（true = 内容超了上限，只用了一部分）。
  */
 data class SystemBudget(
     val promptChars: Int,
@@ -690,6 +808,8 @@ data class SystemBudget(
     val summaryChars: Int = 0,
     /** 协调时为「会话摘要」预留的字符数（摘要可能这一轮才出现，所以要提前留位）。 */
     val reservedSummaryChars: Int = 0,
+    /** 提示词文件被截断了吗？（true = 内容超了上限，只用了一部分） */
+    val promptFileTruncated: Boolean = false,
 ) {
     /** 是否会超限（按**实际**发出的字符数算）。 */
     val over: Boolean get() = limitChars != null && totalChars > limitChars

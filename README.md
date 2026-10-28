@@ -145,10 +145,13 @@ sdk-core/src/main/kotlin/ai/agentkernel/
 │   ├── ContextMemory.kt        # 编排者：超容量→压一次、闲置→归档
 │   ├── ConversationSummarizer.kt # 一条摘要指令线（压缩与归档共用）
 │   ├── MemoryStore.kt          # var/memory/（跨话题的结论摘要）
-│   └── AgentMemoryCapabilities.kt # agent-memory 命令（list/get/add/edit/delete/search）
+│   └── AgentMemoryCapabilities.kt # agent-memory 命令（list/get/add/edit/patch/delete/search）
 ├── archive/                    # 会话分段归档（**对话原文**，不进提示词，给前端翻）
 │   ├── ArchiveSegment.kt       # 一段的元信息（带链）+ 原文
 │   └── ArchiveStore.kt         # index.json + segments/；段与段之间有链
+├── text/                       # 按行改文本（**只改目标几行**，不用整篇重写）
+│   ├── TextPatch.kt            # 行级补丁原语（锚点/行号 → 精确改某几行）
+│   └── AgentTextCapabilities.kt # agent-text 命令（read/patch；只在沙箱根下面）
 
 sdk-android/src/main/kotlin/ai/agentkernel/android/
 ├── AndroidCommandExecutor.kt  # Runtime.exec，无 PTY（对应 Termux AppShell 路径）
@@ -183,10 +186,11 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 | `sdk-android/src/test/kotlin/ai/agentkernel/MockLlmServer.kt` | 那个 mock 服务端（裸 `ServerSocket` 写的，**故意不用 `com.sun.net.httpserver`** —— 后者在 Android 上不存在，这套 mock 要能原样搬到真机 instrumented test 里跑） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/device/DeviceCapabilityTest.kt` | **能力路由**（纯 JVM，25 条）：认命令、拆参数、复合命令改写、失败转非零退出码、命令名逐字对齐 Termux |
 | `sdk-android/src/test/kotlin/ai/agentkernel/DeviceCapabilityRoutingTest.kt` | **能力接进执行器**：整条命令进程内执行（不起子进程）、失败退出码、复合命令结果回 stdout、能力清单进工具描述 |
-| `sdk-core/src/test/kotlin/ai/agentkernel/memory/ContextMemoryTest.kt` | **压缩与闲置归档**：超容量压一次、切分点不能落在工具结果上、归档后开新会话、**摘要掉的原文落归档段**（17 条） |
-| `sdk-core/src/test/kotlin/ai/agentkernel/archive/ArchiveStoreTest.kt` | **分段归档**：段与段之间的链、列表排序、分页不重不漏、原文能原样读回来、**索引坏了能从正文目录重建（链不丢）**（9 条） |
+| `sdk-core/src/test/kotlin/ai/agentkernel/memory/ContextMemoryTest.kt` | **压缩与闲置归档**：超容量压一次、切分点不能落在工具结果上、归档后开新会话、**摘要掉的原文落归档段**（23 条） |
+| `sdk-core/src/test/kotlin/ai/agentkernel/archive/ArchiveStoreTest.kt` | **分段归档**：段与段之间的链、列表排序、分页不重不漏、原文能原样读回来、**索引坏了能从正文目录重建（链不丢）**（20 条） |
+| `sdk-core/src/test/kotlin/ai/agentkernel/TestVoidReturnTest.kt` | **「每条测试都真的跑了」**（1 条）：扫一遍测试源码集，只要还有**返回类型不是 `void`** 的 `@Test` 就失败 —— 挡的是「测试存在、却被 JUnit 5 静默忽略」这类漏网（不执行、不报错、套件照样全绿） |
 
-> 当前全量：**sdk-core 168 条 + sdk-android 52 条**（后者在 debug / release 两个变体各跑一遍），
+> 当前全量：**sdk-core 276 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
 > **0 跳过、0 失败、0 错误**。
 
 > 交付包原本的自测是一份手工 `main()`（`selftest/SelfTest.kt`），需要 661MB 的 `.toolchain/`
@@ -198,7 +202,7 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 
 `WireFormatTest` 的基准不是想象的形状，而是 DeepSeek 官方线格式那份
 **标注了 "cross-checked against live streams"** 的实现
-（harness 仓库 `packages/llm/llm-deepseek/src/types.ts` 与同目录 `serialize.ts`）。
+（上游那份模型协议的类型定义与序列化实现）。
 
 这几条在本地 mock 上**全都看不出来**（mock 照单全收），但对着真服务时每条都是当场 400：
 
@@ -415,7 +419,7 @@ val client = ChatCompletionsClient(
 模型看不见这台手机 —— 它不知道自己在哪儿、工作目录是哪儿、哪些命令能用、哪些事做不了。
 所以 SDK **默认会生成一段系统提示词**（`AgentSystemPrompt`），一次讲清楚：
 
-- 拟 Linux 环境（`HOME` / `PREFIX` / `TMPDIR` / `AGENT_TRASH` / `PATH`）；
+- 拟 Linux 环境（`HOME` / `PREFIX` / `TMPDIR` / `AGENT_TRASH` / `AGENT_VAR` / `PATH`）；
 - 这台设备上**实测存在**的命令清单（白名单 ∩ 实际 stat，不写死）；
 - 设备能力清单（`termux-*`）与 SDK 自制命令（`agent-*`）；
 - 能力边界（哪些事做不了）；
@@ -435,7 +439,7 @@ val prompt = AndroidAgentSdk.buildSystemPrompt(executor)   // 默认完整清单
 | 档位 | 什么时候用 |
 |------|-----------|
 | `FULL`（**默认**） | 直连 DeepSeek 官方等**没有 system 段字数上限**的服务 —— 列全更有用 |
-| `CORE` | 你的服务对客户端 system 段有字数上限（实测有硬截断到 2000 字符的）—— 瘦身后装得下，完整清单仍在 `skills/android-capability` 里按需查 |
+| `CORE` | **保险档**：提示词本体守住 **< 2000**（SDK 自己的回归硬盯着）—— 上限是服务端可调参数，运营随时可能调小，CORE 保证「再调小也不砍提示词尾巴」；完整清单仍在 `skills/android-capability` 里按需查 |
 
 
 ## 上下文与缓存命中：**前缀稳定**才是省 token 的关键
@@ -542,8 +546,10 @@ DeepSeek 官方两个模型都是 64K 上下文，默认 24,000 字符（约 15K
 
 ```
 <filesDir>/agent/var/memory/
-├── index.json                ← 索引（id / 时间 / 标题）
-└── entries/20261028-1432.md  ← 一条一份，纯 markdown
+├── index.json                ← 索引（id / 时间 / 标题 / 种类）
+└── entries/
+    ├── 20261028-1432.md      ← 一条一份，纯 markdown（日常条目）
+    └── daily-20261029.md     ← 每日摘要槽（每天一个，后来的替换前面的）
 ```
 
 **是普通文件，不是数据库** —— 所以 agent 用**已有的终端能力**就能读：
@@ -552,6 +558,90 @@ DeepSeek 官方两个模型都是 64K 上下文，默认 24,000 字符（约 15K
 cat $AGENT_ROOT/var/memory/index.json
 cat $AGENT_ROOT/var/memory/entries/*.md
 ```
+
+### 记忆分两块：今天的摘要 + 你自己记下的事
+
+**为什么分两块**：两类的**写入语义根本不同**。日常条目是**追加**的（agent 自己记的，越记越多）；
+每日摘要是**替换**的（同一天只有一条，新的摘要盖掉旧的）。
+不统一成追加的话，一天聊十次就有十条摘要，十条全进提示词 ——
+每轮都在为重复内容付钱，模型看到的还是十份「今天聊过什么」的残片。
+
+| | 种类 | 写入语义 | id |
+|---|---|---|---|
+| **每日摘要槽** | `DAILY` | 每天一条，新摘要**替换**当天那条 | `daily-20261029` |
+| **日常条目** | `NOTE` | **追加**，不被摘要替换 | 时间戳 |
+
+进提示词的**记忆块**也是这两块：
+
+```
+## 你之前和用户聊过什么（长期记忆）
+
+### 今天的摘要
+<当天那份摘要正文>
+
+### 你自己记下的事
+- [10-29] 标题
+  正文行
+```
+
+**预算不够时先砍「你自己记下的事」**，再砍摘要正文 ——
+日常条目能用 `agent-memory search` 取回来，摘要正文是「今天聊了什么」的锚。
+
+### 容量上限：满了就删最旧的
+
+**为什么要设上限**：记忆**要进提示词**（每轮都要重发 ⇒ 代价每轮都付），
+归档段**要落盘**（每压一次就长一段）—— 两者都随时间单调增长。
+不设上限 ⇒ App 越来越大、每轮请求越来越贵。
+
+四个旋钮都在 `ContextPolicy` 里：
+
+| 参数 | 管什么 | 默认 |
+|---|---|---|
+| `archiveMaxSegments` | 最多留多少段会话归档 | 200 |
+| `archiveMaxChars` | 归档段的总字符上限 | 2,000,000 |
+| `memoryMaxEntryChars` | 单条记忆正文上限 | 4,000 |
+| `memoryMaxTotalChars` | 全部记忆的总字符上限 | 40,000 |
+
+满了就**删最旧的** —— 这是**机械规则，不问模型**
+（让模型决定删什么 = 不确定性：它可能不删、可能删错、每次还不一样）。
+
+两条**永不删**：
+
+- **每日摘要槽永远不删** —— 它是「今天聊了什么」的锚，删了模型就不知道当下的上下文；
+- **最新的一段归档永远不删** —— 那是当前正在用的历史。
+
+上限是**硬线**：设了**立刻生效**（按新上限收拾一遍已有数据），
+之后**每次写入**再检查一次。
+
+### 按行改：不用整篇重写
+
+**为什么不用整篇重写**：agent 改一个几百行的文件时，让模型把全文重新输出一遍有三个老问题 ——
+**措辞会漂**（每次重新生成，口气都不一样）、**费 token**（全文读一次写一次）、
+写错一行就毁全文。行级补丁把「改哪儿」变成**行号**或**锚点**，
+改完还能回一段 **diff** 让它自己核对。
+
+两条命令，用同一套规格：
+
+```bash
+agent-memory patch 20261028-1432 "replace-lines 2 2 阈值按 60"   # 只改记忆里的某几行
+agent-text read notes.md                                          # 先看现状
+agent-text patch notes.md "replace-lines 2 2 新的第二行"          # 只改沙箱文件里的某几行
+```
+
+规格四种：
+
+| 规格 | 写法 |
+|---|---|
+| `replace-lines` | `replace-lines <起> <止> <新内容>` |
+| `insert-after` | `insert-after <行号> <新内容>` |
+| `delete-line` | `delete-line <行号>` |
+| `replace-block` | `replace-block <锚点>\|<新内容>`（**必须用 `\|` 分隔**，整段加引号） |
+
+- 参数里的 `\n` 表示**真换行**（shell 引号里传不了真换行）；
+- **锚点必须唯一**：命中多处会报错并列出候选行号（猜哪一处 = 静默改坏文件）。
+
+**沙箱边界**：`agent-text` 只允许改**沙箱根下面**的相对路径 ——
+`..`、绝对路径、符号链接逃逸**一律拒绝**。
 
 ### agent 自己能增删改查（`agent-memory`）
 
@@ -562,11 +652,18 @@ agent-memory list                        # 有哪些（id / 时间 / 标题 / �
 agent-memory get 20261028-1432           # 读一条正文
 agent-memory search 网关                 # 按关键词找
 agent-memory add "用户确认：灌溉阈值按 80"   # 记一条
-agent-memory edit 20261028-1432 "改成：阈值按 60"  # 改一条
+agent-memory edit 20261028-1432 "改成：阈值按 60"  # 整条替换
+agent-memory patch 20261028-1432 "replace-lines 2 2 阈值按 60"  # ★ 只改某几行
 agent-memory delete 20261028-1432        # 删一条
 ```
 
+`patch` 只改你指定的那几行，其余原样不动 ——
+整条替换的代价是**每次重新生成都会让措辞漂**，而长正文每次全量读写又费 token。
+规格里的 `\n` 表示真换行；`replace-block` 用 `|` 分隔锚点与新内容（整段要加引号）。
+
 输出是 JSON，失败时 `ok:false` + 非零退出码。
+`patch` 的输出字段是 `ok` / `id` / `chars` / `diff`（`diff` 是「改了哪几行」的短描述，
+让 agent 自己核对改对了没有）。
 注册（路径由 SDK 算，**别自己拼**）：
 
 ```kotlin
@@ -608,7 +705,7 @@ b.overflow    // ★ 把记忆砍光也装不下 ⇒ 提示词本身太大，改
 真机实测（小米 Android 16）：设备提示词 1883 + 记忆 digest 281 = **2166/6000** ✅；
 在老上限 2000 下，那 281 字符的记忆 digest **会被整段砍掉**（模型压根没看见）。
 
-### 压缩请求是**逐字重放**的（dsh 那一套）
+### 压缩请求是**逐字重放**的
 
 压缩那一次请求，**不是**把旧对话渲染成文本再发出去（旧版本那样做 ⇒ 压缩这次调用**不吃缓存**）。
 现在是：
@@ -700,7 +797,7 @@ val segment = store.read(first.first().id)   // segment.messages 是结构化的
 `agent-sdk-demo/` 是一个**能点的演示台**（Kotlin + Compose），它按坐标依赖本 SDK
 （`mavenLocal()` + `ai.agentkernel:sdk-android:1.0.0`）——所以它同时是**外置接入的活样例**。
 
-四个页签：
+五个页签：
 
 | 页签 | 做什么 |
 |------|-------|
@@ -708,12 +805,14 @@ val segment = store.read(first.first().id)   // segment.messages 是结构化的
 | **自检** | 「一键自检」自动跑完全部能力 + 普通 shell 命令 + 权限现状，逐项给 ✅/⚠️/❌ 与耗时；**页底直接摆着「模型看到的系统提示词」原文** |
 | **对话** | 填服务地址 + token（或 DeepSeek 官方 key），让模型通过 bash 工具下发 `termux-*` 命令去驱动设备 |
 | **归档** | 摘要掉的那段对话**原文**在这里；首屏只取最新一段，往上滚一段一段加载更早的 |
+| **记忆** | 摘要与日常条目**分两块**显示，每条带种类和日期 |
 
-> 自检当前 **34 项**（Android 16 / 小米 / arm64-v8a 实测 **✅ 31–32 · ⚠️ 2–3 · ❌ 0**，
+> 自检当前 **35 项**（Android 16 / 小米 / arm64-v8a 实测 **✅ 31–32 · ⚠️ 2–3 · ❌ 0**，
 > **❌ 一项都没有**）。⚠️ 是如实报告的环境限制，不是缺陷：
-> `CAMERA` 未授权、私有目录不能执行二进制（Android 对私有目录 noexec），
-> 以及**读剪贴板**需要 App 有前台焦点（Android 10+ 的系统限制；
-> App 在后台时它就是 ⚠️，不是 ❌）。
+> `CAMERA` 未授权、私有目录不能执行二进制（Android 对私有目录 noexec）、
+> **读剪贴板**需要 App 有前台焦点（Android 10+ 的系统限制；
+> App 在后台时它就是 ⚠️，不是 ❌），
+> 以及 **`agent-http-get` 偶尔因冷启动 DNS + TLS 慢而超时**（重跑就通，属网络抖动，不是缺陷）。
 >
 > 自检本身也有三条规矩：**阈值不写死**（先量占用再压到一半）、
 > **空结果不算通过**（探测坏了 ≠ 没有）、**自检不留垃圾**（加的定时任务自己删掉）。
@@ -792,10 +891,24 @@ agent 不是「跑完一条命令就完了」——它在一个**隔离工作区
 
 ### SDK 自制命令（`agent-` 前缀，不在 Termux:API 里）
 
-`agent-workspace` / `agent-cleanup` / `agent-quota` / `agent-schedule` / `agent-http-get` / `agent-http-post`。
+`agent-workspace` / `agent-cleanup` / `agent-quota` / `agent-schedule` / `agent-http-get` / `agent-http-post`
+/ `agent-memory` / `agent-text`。
 
 用**另一个前缀**是为了不让模型把 SDK 自制命令误当成 Termux 命令到处找；
 系统提示词里也会**分开介绍**这两类。
+
+### 改文件只改几行（`agent-text`）
+
+`agent-text` 让 agent **按行**改沙箱里的文本文件，而不是每次把整个文件重写一遍：
+
+```bash
+agent-text read notes.md                             # 先看现状
+agent-text patch notes.md "replace-lines 2 2 新的第二行"   # 只改第 2 行
+agent-text patch notes.md "replace-block|旧标题|新标题"     # 按内容定位（要加引号）
+```
+
+只允许改**沙箱根下面**的相对路径；`..`、绝对路径、符号链接逃逸一律拒绝。
+用法见 `skills/agent-text/SKILL.md`。
 
 ### 宿主自己的数据 API
 
@@ -822,20 +935,31 @@ toybox 的子命令集合跟系统版本走（`awk`/`xxd`/`stat`/`timeout` 都�
   ```
 
 **默认是「完整清单」（`CommandDetail.FULL`）—— 直连官方模型服务时没有 system 段字数上限。**
-但如果你的服务会把客户端 system 段**硬截断到 2000 字符**（实测很多中转服务会），
+但服务端那段上限是**可调参数**（默认 6000，运营随时可能调小；有些中转服务老实现直接硬截到 2000），
 砍掉的正好是提示词**尾部** —— 也就是「能力清单」和「工作区维护规则」这两段最要命的内容。
 这时就显式传 `commandDetail = AgentSystemPrompt.CommandDetail.CORE`：
 提示词只写**核心命令**（仍然是白名单 ∩ 实存），**完整清单在 `skills/android-capability`** 里按需查。
 
-实测（真机等价输入，`DevicePromptBudgetTest` 复刻并交叉校验过）：**核心模式 1797 字符**，
-装得进 2000 预算（余量 203）；**完整模式 2197 字符**。
+实测（真机等价输入，`DevicePromptBudgetTest` 复刻并交叉校验过）：**核心模式 1933 字符**，
+装得进 **2000 的保险线**（余量 ≈ 67 字符，这条线 SDK 自己的回归硬盯着）；
+**完整模式 2403 字符**（网关 client system 上限 6000，装得下）。
+
+> ⚠️ 两个「2000」别混：**system 段总长**（提示词+记忆+摘要+告警，服务端参数，默认 6000，可调）
+> vs **提示词本体 < 2000**（SDK 自己的保险线，让提示词在上限被调小时也不被砍）。
+> 要往提示词里加东西，先量这条保险线。
 环境段也一起压了：只写一次绝对路径（工作区根），子路径用 `$AGENT_ROOT/…` `$PREFIX/…` 拼 ——
 这些变量在 shell 里是真设了的，模型写出来直接能跑。
 
+**核心模式怎么装下这么多东西**：能力可以额外提供一个**短用法**（`shortUsage`），
+核心模式**只列短用法**（完整参数形态进技能文档，按需查），完整模式仍列完整用法。
+一条完整用法动辄上百字符，写详细了核心模式就装不下；而删掉这条命令更糟
+（模型压根不知道它存在）。⇒ 核心模式给短用法，完整形态让模型按需问命令
+（能力失败时会把完整用法回给它）或查技能文档。
+
 | 模式 | 提示词内容 | 真机长度 |
 |---|---|---|
-| `FULL`（默认） | 全部探测到的命令（82 条）+ 能力清单 + 边界 + 工作区规则 | 2197 字符 |
-| `CORE` | 核心命令（28 条）+ 能力清单 + 边界 + 工作区规则 | 1797 字符 |
+| `FULL`（默认） | 全部探测到的命令（82 条）+ 能力清单（完整用法）+ 边界 + 工作区规则 | 2403 字符 |
+| `CORE` | 核心命令（28 条）+ 能力清单（**短用法**）+ 边界 + 工作区规则 | 1933 字符 |
 
 ⚠️ `CORE` 模式**故意不教原生 `curl -H`** —— 免得模型为了调宿主的数据接口就写
 `curl -H 'Authorization: Bearer …'`，那会把凭证写进命令历史和转录；
@@ -844,7 +968,7 @@ toybox 的子命令集合跟系统版本走（`awk`/`xxd`/`stat`/`timeout` 都�
 > ⚠️ **这份清单只管「告诉模型什么」，不管「拦不让你跑」。**
 > 真机实测：`/system/bin` 有 **434** 个可执行文件，提示词只介绍了 **82** 个 ——
 > 剩下 **352** 个（`vmstat`/`strace`/`top`/`dumpsys`…）**照样能跑**。
-> 被接管的是**注册过的能力命令**（13 个），其它一律原样丢给 `/system/bin/sh`。
+> 被接管的是**注册过的能力命令**（14 个），其它一律原样丢给 `/system/bin/sh`。
 > 详见《接入指南》11.8。
 
 ### 定时任务
@@ -854,7 +978,8 @@ toybox 的子命令集合跟系统版本走（`awk`/`xxd`/`stat`/`timeout` 都�
 
 ### 技能目录
 
-`skills/` 下：`agent-workspace`（环境与维护规范）、`agent-data-api`（宿主数据接口调用）、
+`skills/` 下：`agent-workspace`（环境与维护规范）、`agent-memory`（长期记忆）、
+`agent-text`（按行改文本）、`agent-data-api`（宿主数据接口调用）、
 `agent-scheduling`（定时任务）、`android-capability`（硬件能力速查）。
 
 ## 五条必须知道的硬约束

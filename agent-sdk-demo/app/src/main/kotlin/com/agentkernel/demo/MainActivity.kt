@@ -1,5 +1,6 @@
 package com.agentkernel.demo
 
+import ai.agentkernel.memory.MemoryEntry
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -26,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.FactCheck
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PlayArrow
@@ -96,6 +98,9 @@ class MainActivity : ComponentActivity() {
         // 命令行跑归档分页自检（首屏只取最新一段 / 一次只多一段 / 链对得上）：
         //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_archive_paging true
         val autorunArchivePaging = intent?.getBooleanExtra("autorun_archive_paging", false) ?: false
+        // 命令行跑行级补丁自检（agent-memory patch / agent-text patch 真能改一行）：
+        //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_patch true
+        val autorunPatch = intent?.getBooleanExtra("autorun_patch", false) ?: false
         // 网关配置也能从命令行注入（**运行时**的，token 不进 APK）：
         //   --es gateway_url ... --es gateway_token ... --es gateway_model ...
         // 思考强度用**强度编码**注入（2 的幂：1=关闭思考 2=low 4=medium 8=high 16=max）：
@@ -114,7 +119,18 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                DemoApp(state, autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory, autorunArchive, autorunArchivePaging)
+                DemoApp(
+                    state,
+                    autorunSelfCheck,
+                    autorunTorch,
+                    autorunChat,
+                    autorunChatMulti,
+                    autorunEfforts,
+                    autorunMemory,
+                    autorunArchive,
+                    autorunArchivePaging,
+                    autorunPatch,
+                )
             }
         }
     }
@@ -132,13 +148,14 @@ fun DemoApp(
     autorunMemory: Boolean = false,
     autorunArchive: Boolean = false,
     autorunArchivePaging: Boolean = false,
+    autorunPatch: Boolean = false,
 ) {
     var tab by remember {
         mutableStateOf(
             when {
                 autorunArchive -> 3
                 !autorunChat.isNullOrBlank() || !autorunChatMulti.isNullOrBlank() -> 2
-                autorunSelfCheck || autorunTorch || autorunMemory -> 1
+                autorunSelfCheck || autorunTorch || autorunMemory || autorunPatch -> 1
                 else -> 0
             },
         )
@@ -157,12 +174,12 @@ fun DemoApp(
     // 两条路径**互斥**（一次只跑一条），免得并发抢同一个 torch。
     // ★ 一律走 state.start*() —— 它们在 **viewModelScope** 里跑，
     //   activity 重建不会把正在跑的 agent 循环掐断（详见 DemoState.startChatAutorun）。
-    LaunchedEffect(autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory) {
+    LaunchedEffect(autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory, autorunPatch) {
         android.util.Log.i(
             "AgentSdkDemo",
             "[CHAT] [effect-enter] selfcheck=$autorunSelfCheck torch=$autorunTorch " +
                 "chatLen=${autorunChat?.length} multiLen=${autorunChatMulti?.length} efforts=$autorunEfforts " +
-                "memory=$autorunMemory",
+                "memory=$autorunMemory patch=$autorunPatch",
         )
         if (autorunTorch) {
             state.startTorchCheck()
@@ -172,6 +189,8 @@ fun DemoApp(
             state.startArchivePagingCheck()
         } else if (autorunMemory) {
             state.startMemoryCheck()
+        } else if (autorunPatch) {
+            state.startPatchCheck()
         } else if (!autorunChatMulti.isNullOrBlank()) {
             // 多轮：用来观察缓存命中率随轮次的上升曲线。
             state.startChatMultiAutorun(
@@ -212,6 +231,12 @@ fun DemoApp(
                     icon = { Icon(Icons.Filled.History, null) },
                     label = { Text("归档") },
                 )
+                NavigationBarItem(
+                    selected = tab == 4,
+                    onClick = { tab = 4 },
+                    icon = { Icon(Icons.Filled.ContentCopy, null) },
+                    label = { Text("记忆") },
+                )
             }
         },
     ) { padding ->
@@ -219,7 +244,8 @@ fun DemoApp(
             0 -> CapabilitiesScreen(state, padding)
             1 -> SelfCheckScreen(state, padding)
             2 -> ChatScreen(state, padding)
-            else -> ArchiveScreen(state, padding)
+            3 -> ArchiveScreen(state, padding)
+            else -> MemoryScreen(state, padding)
         }
     }
 }
@@ -306,7 +332,7 @@ fun CapabilitiesScreen(state: DemoState, padding: PaddingValues) {
         }
 
         SectionTitle("SDK 自制命令（agent- 前缀，不在 Termux:API 里）")
-        CapabilityCatalog.internalCommands.chunked(2).forEach { row ->
+        state.internalCommandSpecs.chunked(2).forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 row.forEach { spec ->
                     CapabilityCard(
@@ -314,7 +340,13 @@ fun CapabilitiesScreen(state: DemoState, padding: PaddingValues) {
                         modifier = Modifier.weight(1f),
                         onClick = {
                             scope.launch {
-                                val r = state.runCommand(spec.title, spec.command)
+                                // ★ `agent-text` 那张卡片上写的是**用法行**，不是一条可执行命令 ——
+                                //   照着跑只会得到「不认识的子命令」。所以点它跑的是一条真例子。
+                                val r = if (spec.key == "agent-text") {
+                                    state.runAgentTextDemo()
+                                } else {
+                                    state.runCommand(spec.title, spec.command)
+                                }
                                 last = r
                                 state.capabilityResults.add(r)
                             }
@@ -713,6 +745,101 @@ fun ChatScreen(state: DemoState, padding: PaddingValues) {
         }
     }
 }
+
+// ---------------------------------------------------------------- 记忆
+
+/**
+ * 记忆页 —— **两块**：今天的摘要 / 你自己记下的事。
+ *
+ * ★ 两块的口径与 SDK 的 `MemoryStore.digest()` **一致**：
+ *   界面上看到的分法，跟**模型**在提示词里看到的分法是同一份
+ *   （摘要 = 最新的每日槽，日常 = 追加式条目）。
+ *   两边对不上，用户就没法拿界面核对模型到底看见了什么。
+ *
+ * 每条都标出**种类**（摘要 / 日常）和**日期** —— 记忆不标日期就只是一堆字。
+ */
+@Composable
+fun MemoryScreen(state: DemoState, padding: PaddingValues) {
+    LaunchedEffect(Unit) { state.loadMemory() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("长期记忆", fontWeight = FontWeight.Bold)
+                Text(
+                    "口径与提示词里那一块一致：摘要 = 今天的每日槽，日常 = 追加式条目",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = { state.loadMemory() }) { Text("刷新") }
+        }
+
+        SectionTitle("今天的摘要（每天一条，新摘要替换当天那条）")
+        val daily = state.memoryDaily
+        if (daily == null) {
+            Text(
+                "今天还没有摘要。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            MemoryCard(daily, kindLabel = "摘要")
+        }
+
+        SectionTitle("你自己记下的事（${state.memoryNotes.size} 条）")
+        if (state.memoryNotes.isEmpty()) {
+            Text(
+                "还没有日常条目。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            state.memoryNotes.forEach { entry -> MemoryCard(entry, kindLabel = "日常") }
+        }
+    }
+}
+
+/** 一条记忆：种类 + 日期 + 标题 + 正文。 */
+@Composable
+private fun MemoryCard(entry: MemoryEntry, kindLabel: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Text(
+                "$kindLabel · ${formatMemoryTime(entry.createdAt)}",
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+            )
+            if (entry.title.isNotBlank()) {
+                Text(entry.title, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (entry.summary.isNotBlank()) {
+                Text(
+                    entry.summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** 记忆条目的日期（本地时区 —— 用户说的「今天」是本地日历上的今天）。 */
+private fun formatMemoryTime(millis: Long): String =
+    java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(millis))
 
 // ---------------------------------------------------------------- 归档
 

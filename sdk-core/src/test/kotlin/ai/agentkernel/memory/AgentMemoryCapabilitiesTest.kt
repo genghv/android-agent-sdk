@@ -2,7 +2,10 @@ package ai.agentkernel.memory
 
 import ai.agentkernel.device.CapabilityFailure
 import ai.agentkernel.device.CapabilityOrigin
+import ai.agentkernel.device.CapabilityResult
 import ai.agentkernel.device.DeviceCapability
+import ai.agentkernel.device.DeviceCapabilityRegistry
+import ai.agentkernel.device.DeviceCommand
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
@@ -15,6 +18,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -41,6 +45,23 @@ class AgentMemoryCapabilitiesTest {
         return Json.parseToJsonElement(raw).jsonObject
     }
 
+    /** 经注册表跑一条命令 —— 失败会被转成 `{"ok":false,...}` + 非零退出码。 */
+    private fun runViaRegistry(cap: DeviceCapability, vararg args: String): CapabilityResult {
+        val registry = DeviceCapabilityRegistry(listOf(cap))
+        return registry.execute(DeviceCommand("agent-", cap.name, args.toList(), 0, 0))
+    }
+
+    /**
+     * 按 shell 规则把一整条命令拆成能力参数（引号里的 `|` 原样保留）。
+     *
+     * 走的是**真实的解析器** —— 「规格被拆成好几个参数」这件事只有经过它才算数。
+     */
+    private fun splitArgs(cap: DeviceCapability, line: String): List<String> {
+        val registry = DeviceCapabilityRegistry(listOf(cap))
+        val cmd = registry.parseWhole(line) ?: error("这不是一条完整的能力命令：$line")
+        return cmd.args
+    }
+
     // ---- 契约本身 ----
 
     @Test
@@ -52,6 +73,7 @@ class AgentMemoryCapabilitiesTest {
         assertEquals(CapabilityOrigin.INTERNAL, cap.origin)
         assertEquals("agent-", cap.prefix, "内部自制的命令前缀是 agent-")
         assertTrue(cap.usage.startsWith("agent-memory "), "用法要带完整命令名：${cap.usage}")
+        assertTrue(cap.usage.contains("patch <id> <补丁规格>"), "用法行要带 patch 子命令：${cap.usage}")
     }
 
     // ---- 六条路径 ----
@@ -158,6 +180,8 @@ class AgentMemoryCapabilitiesTest {
         assertFailsWith<CapabilityFailure> { cap.run(listOf("add")) }
         assertFailsWith<CapabilityFailure> { cap.run(listOf("delete")) }
         assertFailsWith<CapabilityFailure> { cap.run(listOf("search")) }
+        assertFailsWith<CapabilityFailure> { cap.run(listOf("patch")) }
+        assertFailsWith<CapabilityFailure> { cap.run(listOf("patch", "20261028-1000")) }
     }
 
     @Test
@@ -166,5 +190,119 @@ class AgentMemoryCapabilitiesTest {
         assertFailsWith<CapabilityFailure> { cap.run(listOf("get", "没有这条")) }
         assertFailsWith<CapabilityFailure> { cap.run(listOf("edit", "没有这条", "正文")) }
         assertFailsWith<CapabilityFailure> { cap.run(listOf("delete", "没有这条")) }
+    }
+
+    // ---- patch：行级补丁（只贴改动部分）----
+
+    @Test
+    fun `patch 改一行并回 diff`() {
+        val store = store()
+        store.append(MemoryEntry("20261028-1000", 1_000L, "标题", "第一行\n第二行\n第三行"))
+
+        val out = run(capability(store), "patch", "20261028-1000", "replace-lines", "2", "2", "新的第二行")
+        assertTrue(out["ok"]!!.jsonPrimitive.boolean)
+        assertEquals("20261028-1000", out["id"]!!.jsonPrimitive.content)
+
+        val body = store.readBody("20261028-1000")!!
+        assertEquals("第一行\n新的第二行\n第三行", body, "只改了第 2 行")
+        assertEquals(body.length, out["chars"]!!.jsonPrimitive.int, "chars = 改完正文的字符数")
+
+        val diff = out["diff"]!!.jsonPrimitive.content
+        assertTrue(diff.isNotBlank(), "diff 要有内容")
+        assertTrue(diff.contains("2"), "diff 要带改动的行号：$diff")
+    }
+
+    @Test
+    fun `patch 规格被拆成多个参数也能拼起来解析`() {
+        val store = store()
+        store.append(MemoryEntry("20261028-1000", 1_000L, "标题", "第一行\n第二行\n第三行"))
+        val cap = capability(store)
+
+        // 整条命令按 shell 规则拆词后，规格散成 6 个参数 —— 要拼回一个规格串再解析。
+        val args = splitArgs(cap, "agent-memory patch 20261028-1000 replace-lines 2 2 新的第二行")
+        assertEquals(listOf("patch", "20261028-1000", "replace-lines", "2", "2", "新的第二行"), args)
+
+        val out = run(cap, *args.toTypedArray())
+        assertTrue(out["ok"]!!.jsonPrimitive.boolean)
+        assertEquals("第一行\n新的第二行\n第三行", store.readBody("20261028-1000")!!)
+    }
+
+    @Test
+    fun `patch 的 replace-block 保留竖线`() {
+        val store = store()
+        store.append(MemoryEntry("20261028-1000", 1_000L, "标题", "第一行\n第二行"))
+        val cap = capability(store)
+
+        // `|` 在 shell 里是管道操作符 ⇒ 整段规格必须加引号；引号里的 `|` 原样保留。
+        val args = splitArgs(cap, "agent-memory patch 20261028-1000 \"replace-block|第一行|新的第一行\"")
+        assertEquals(listOf("patch", "20261028-1000", "replace-block|第一行|新的第一行"), args)
+
+        val out = run(cap, *args.toTypedArray())
+        assertTrue(out["ok"]!!.jsonPrimitive.boolean)
+        assertEquals("新的第一行\n第二行", store.readBody("20261028-1000")!!)
+    }
+
+    @Test
+    fun `patch 目标不存在要报错`() {
+        val cap = capability(store())
+
+        val e = assertFailsWith<CapabilityFailure> {
+            cap.run(listOf("patch", "没有这条", "delete-line", "1"))
+        }
+        assertTrue(e.message!!.contains("没有这条记忆"), "要说清是「没这条」：${e.message}")
+
+        // 注册表会把它转成 {"ok":false,...} + 非零退出码。
+        val r = runViaRegistry(cap, "patch", "没有这条", "delete-line", "1")
+        assertFalse(r.ok)
+        assertTrue(r.exitCode != 0, "失败要非零退出码")
+        val err = Json.parseToJsonElement(r.output).jsonObject
+        assertFalse(err["ok"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `patch 规格格式不对要带用法`() {
+        val store = store()
+        store.append(MemoryEntry("20261028-1000", 1_000L, "标题", "第一行\n第二行"))
+        val cap = capability(store)
+
+        // replace-block 缺 `|` —— 锚点边界猜不出来，必须报错（不能猜着改）。
+        val e = assertFailsWith<CapabilityFailure> {
+            cap.run(listOf("patch", "20261028-1000", "replace-block", "第一行", "新行"))
+        }
+        assertTrue(e.message!!.contains("agent-memory"), "要带用法让模型自我纠正：${e.message}")
+
+        val r = runViaRegistry(cap, "patch", "20261028-1000", "replace-block", "第一行", "新行")
+        assertFalse(r.ok)
+        val err = Json.parseToJsonElement(r.output).jsonObject
+        assertFalse(err["ok"]!!.jsonPrimitive.boolean)
+        assertTrue(err["error"]!!.jsonPrimitive.content.contains("agent-memory"))
+        assertEquals("第一行\n第二行", store.readBody("20261028-1000")!!, "没打上就不能改")
+    }
+
+    @Test
+    fun `patch 锚点找不到要报错`() {
+        val store = store()
+        store.append(MemoryEntry("20261028-1000", 1_000L, "标题", "第一行\n第二行"))
+        val cap = capability(store)
+
+        val e = assertFailsWith<CapabilityFailure> {
+            cap.run(listOf("patch", "20261028-1000", "replace-block|不存在的锚点|新行"))
+        }
+        assertTrue(e.message!!.contains("锚点"), "要说清是锚点没找到：${e.message}")
+        assertEquals("第一行\n第二行", store.readBody("20261028-1000")!!, "没打上就不能改")
+    }
+
+    @Test
+    fun `patch 锚点命中多处要带行号`() {
+        val store = store()
+        store.append(MemoryEntry("20261028-1000", 1_000L, "标题", "重复行\n中间行\n重复行"))
+        val cap = capability(store)
+
+        val e = assertFailsWith<CapabilityFailure> {
+            cap.run(listOf("patch", "20261028-1000", "replace-block|重复行|新行"))
+        }
+        assertTrue(e.message!!.contains("行号"), "命中多处要说清是哪几行：${e.message}")
+        assertTrue(e.message!!.contains("1") && e.message!!.contains("3"), "要带出命中行号：${e.message}")
+        assertEquals("重复行\n中间行\n重复行", store.readBody("20261028-1000")!!, "没打上就不能改")
     }
 }

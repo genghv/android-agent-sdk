@@ -25,17 +25,27 @@ import kotlin.test.assertTrue
  * 所以这里用**真机同款输入**在 JVM 上复刻一遍：
  * - 路径 = 真机包名的 filesDir（`/data/user/0/<pkg>/files`）；
  * - 命令清单 = 真机探测到的白名单命中集（白名单去掉这台机器上没有的两个）；
- * - 能力清单 = 那 12 个命令的 usage 字符串（6 个 termux-* + 6 个 agent-*）；
+ * - 能力清单 = 那 14 个命令的 usage 字符串（6 个 termux-* + 8 个 agent-*）；
+ *   ★ 必须是**真机真实注册的那几条** —— 真机注册了记忆与文本能力，
+ *   这里就也得列上；少列一条 = 测出来的长度比真机短，「真机装不下」会假绿。
  * - 配额策略 = 宿主默认（设备剩余空间的 5%）。
  *
- * 交叉校验：这套输入在**旧环境段**下算出 **2045 字符**，与锚点一致 ⇒
+ * 交叉校验：这套输入在**旧环境段**下算出 **2126 字符**，与锚点一致 ⇒
  * 复刻是忠实的，于是这里算出的数字可以直接当真机值用。
  *
  * 真机上的权威数字仍然看 Demo 自检打进 logcat 的那行（`| prompt=… chars`）。
  */
 class DevicePromptBudgetTest {
 
-    private class Fake(override val name: String, override val origin: CapabilityOrigin, override val usage: String) :
+    private class Fake(
+        override val name: String,
+        override val origin: CapabilityOrigin,
+        override val usage: String,
+        // ★ 短用法要**与真实实现逐字一致**（AgentMemoryCapabilities.shortUsage /
+        //   AgentTextCapabilities.shortUsage 那边各有单测锁着）——
+        //   这里写错了，这条预算测试就会测出一个真机上不存在的长度。
+        override val shortUsage: String = usage,
+    ) :
         DeviceCapability {
         override fun run(args: List<String>): String = okJson { }
     }
@@ -55,6 +65,11 @@ class DevicePromptBudgetTest {
             Fake("schedule", CapabilityOrigin.INTERNAL, "agent-schedule list|add \"<cron>\" \"<动作>\"|remove <id>|due"),
             Fake("http-get", CapabilityOrigin.INTERNAL, "agent-http-get <url|相对路径> [--header \"K: V\"] [--timeout 15000]"),
             Fake("http-post", CapabilityOrigin.INTERNAL, "agent-http-post <url|相对路径> [--header \"K: V\"] [--data \"{...}\"]"),
+            // ★ 下面两条是**记忆开着时**才会注册的（宿主不启用记忆就别注册）。
+            //   它们必须在这份假清单里 —— 少了它们，这条预算测试就测不到真机的真实长度，
+            //   而真机上恰恰是它们把提示词顶到了预算边缘。
+            Fake("memory", CapabilityOrigin.INTERNAL, "agent-memory <list|get <id>|add \"<正文>\"|edit <id> \"<正文>\"|patch <id> <补丁规格>|delete <id>|search \"<关键词>\">", "agent-memory <list|get|add|edit|patch|delete|search>"),
+            Fake("text", CapabilityOrigin.INTERNAL, "agent-text <read <相对路径>|patch <相对路径> <补丁规格>>", "agent-text <read|patch>"),
         )
     )
 
@@ -125,12 +140,15 @@ class DevicePromptBudgetTest {
             appendLine("- PATH = $root/usr/bin:/system/bin:/system/xbin")
             appendLine()
         }
+        // ⚠️ 这里必须与 AgentSystemPrompt 的环境段**逐字一致** ——
+        // 对不上 `replace` 就成了 no-op，下面那条断言会误报成「复刻不忠实」。
         val newEnv = buildString {
             appendLine("## 你的环境")
             appendLine("- \$AGENT_ROOT = $root（你只能写这儿）")
             appendLine("- \$HOME = \$AGENT_ROOT/home ← shell 默认 cwd，命令在这跑")
             appendLine("- \$PREFIX = \$AGENT_ROOT/usr ← 拟 Linux 根；\$TMPDIR = \$PREFIX/tmp")
             appendLine("- \$AGENT_TRASH = \$AGENT_ROOT/trash ← 删除先进这儿，不是真删")
+            appendLine("- \$AGENT_VAR = \$AGENT_ROOT/var（memory/ 记忆，archive/ 归档）")
             appendLine("- PATH = \$PREFIX/bin:/system/bin:/system/xbin")
             appendLine()
         }
@@ -159,8 +177,16 @@ class DevicePromptBudgetTest {
          * 提示词正文改一个字（某段标题改短、换个说法），它就得重新量一次 ——
          * 否则文案一变这条断言就误报，而它本来要抓的是「复刻输入不忠实」。
          *
-         * 历史：真机首次量到 2057；提示词正文改写后为 2045。
+         * ★ 换环境段**本身不影响这个锚点**：环境段会被整段换成 `oldEnv` 再量，
+         * 所以加一行 `$AGENT_VAR` 只是把 `newEnv` 一起加长，两边抵消。
+         * 真正动锚点的是**环境段以外**的正文（比如能力段多一条命令）。
+         *
+         * 历史：真机首次量到 2057；提示词正文改写后为 2045；
+         * 能力清单补齐 `agent-memory` / `agent-text` 两条（真机注册了什么，这里就得列什么）后为 2126。
+         *
+         * ★ **改动这份清单后一定要重量**：清单少一条 = 测出来的长度比真机短，
+         *   于是「真机其实装不下」这条测试会假绿 —— 这比测试红更糟。
          */
-        private const val OLD_ENV_ANCHOR = 2045
+        private const val OLD_ENV_ANCHOR = 2126
     }
 }

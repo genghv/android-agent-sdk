@@ -23,10 +23,14 @@ import kotlinx.serialization.json.JsonObject
  * 上游是前缀缓存，**裁头 = 前缀重置 = 一次全 miss**。
  * 压成摘要放进前缀，改动只发生一次，改完重新焐热就又稳了。
  *
- * **② 闲置 → 归档成记忆。**
+ * **② 闲置 → 归档成记忆（写当天的「每日摘要槽」）。**
  * 用户上一轮说完就走了、隔了很久才回来 —— 这一段就是「上一个话题」。
  * 把这一段总结成一条**长期记忆**落盘，然后**开一个新会话**：
  * 过去的事由记忆摘要带着（进前缀），当前会话从零开始。
+ *
+ * ★ 落盘的位置是**当天的每日摘要槽**，不是「再追加一条」：
+ * 同一天再闲置一次，后来的摘要**替换**当天那条 ⇒ 一天永远只有一条。
+ * 跨天则是新的一天的槽位（老那天的还在磁盘上，只是换了一天）。
  *
  * ## ★ 摘要**不删原文**
  *
@@ -36,7 +40,7 @@ import kotlinx.serialization.json.JsonObject
  * | | 内容 | 进提示词？ | 用途 |
  * |---|---|---|---|
  * | **会话摘要** | 压缩出来的一句结论 | ✅ 进 | 模型「记得」之前聊过什么 |
- * | **长期记忆** | 跨话题的结论摘要 | ✅ 进（预算内） | 模型记得「之前聊过什么」 |
+ * | **长期记忆** | 跨话题的结论摘要（闲置归档写的是**当天的每日摘要槽**） | ✅ 进（预算内） | 模型记得「之前聊过什么」 |
  * | **归档段** | 被摘要掉的**对话原文** | ❌ 不进 | **前端照常显示那些对话** |
  *
  * ⇒ 摘要是给**模型**看的，归档是给**用户**看的。
@@ -45,7 +49,8 @@ import kotlinx.serialization.json.JsonObject
  * ## 它不做什么
  *
  * - 不替宿主决定历史怎么存 —— 它只把「该发什么」算好给门面；
- * - 不删任何东西 —— 记忆是**追加**的，磁盘上是全文；原文进归档段；
+ * - 不删对话原文 —— 磁盘上留着全文（原文进归档段）；
+ * - 不追加闲置摘要 —— 闲置归档写的是**每日摘要槽**（同一天后来的替换前面的）；
  * - 不给 agent 加新工具 —— 记忆就是 `<agentRoot>/var/memory/` 下的普通文件，
  *   agent 用已有的终端能力 `cat` 就能读；要增删改查另有**一条**命令
  *   `agent-memory`（见 [AgentMemoryCapabilities]）。
@@ -198,6 +203,9 @@ class ContextMemory(
     /**
      * 宿主主动触发一次归档（比如 App 回到前台、用户按了「结束这话题」）。
      *
+     * ★ 和闲置归档是**同一件事** —— 同样写**当天的每日摘要槽**
+     *   （同一天手动归档几次也只留一条，后来的替换前面的）。
+     *
      * @return 归档出来的那条记忆；没有可归档的内容时是 null。
      */
     suspend fun archiveNow(history: List<ChatMessage>): MemoryEntry? {
@@ -236,6 +244,9 @@ class ContextMemory(
      * 「这一段」= 最后一条用户消息**之前**的所有内容。
      * （最后那条用户消息是本轮的输入，不属于要归档的旧话题。）
      *
+     * ★ 落盘位置 = **当天的每日摘要槽**（[MemoryStore.upsertDaily]）：
+     * 同一天归档几次都只有一条（后来的替换前面的）。
+     *
      * @return 记忆条目 + 被归档的**原文**（原文还要再落一份到归档段里）。
      */
     private suspend fun archiveSession(history: List<ChatMessage>, now: Long): SessionArchive? {
@@ -247,14 +258,11 @@ class ContextMemory(
         val summary = summarizer.summarize(session, policy.summaryTargetChars) ?: return null
         val title = titleOf(summary).ifBlank { "一次对话" }
 
-        val entry = store.append(
-            MemoryEntry(
-                id = MemoryStore.newId(now),
-                createdAt = now,
-                title = title,
-                summary = summary,
-            )
-        )
+        // ★ 写**当天的每日摘要槽**（不是再追加一条）：
+        //   同一天再闲置一次 ⇒ 后来的摘要**替换**当天那条 ⇒ 一天永远只有一条；
+        //   跨天 ⇒ 新的一天、新的槽位（老那天的还在磁盘上）。
+        //   dateKey 由 [MemoryStore.dailyKey] 按归档时刻算出来。
+        val entry = store.upsertDaily(store.dailyKey(now), title, summary)
         return SessionArchive(entry = entry, title = title, session = session)
     }
 
@@ -317,7 +325,8 @@ class ContextMemory(
 /**
  * 一次闲置归档的结果：**记忆条目** + 被归档的**原文**。
  *
- * 记忆给模型看（跨话题的结论），原文给用户看（前端照常显示那些对话）。
+ * 记忆给模型看（跨话题的结论，落盘位置是当天的每日摘要槽），
+ * 原文给用户看（前端照常显示那些对话）。
  */
 private data class SessionArchive(
     val entry: MemoryEntry,

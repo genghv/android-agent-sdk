@@ -83,6 +83,11 @@ object AgentSystemPrompt {
         appendLine("- \$HOME = \$AGENT_ROOT/home ← shell 默认 cwd，命令在这跑")
         appendLine("- \$PREFIX = \$AGENT_ROOT/usr ← 拟 Linux 根；\$TMPDIR = \$PREFIX/tmp")
         appendLine("- \$AGENT_TRASH = \$AGENT_ROOT/trash ← 删除先进这儿，不是真删")
+        // 为什么提 var：长期记忆与会话归档都落在这儿，不说模型就找不到 ——
+        // 找不到就会在工作区里堆一堆「自己的记忆」，而那正是该由记忆命令管的地方。
+        // ★ 这一行每个字符都算预算（核心模式只剩几十字符余量），所以只说「哪个目录是什么」，
+        //   完整目录结构让模型自己 `ls $AGENT_VAR` 看。
+        appendLine("- \$AGENT_VAR = \$AGENT_ROOT/var（memory/ 记忆，archive/ 归档）")
         appendLine("- PATH = \$PREFIX/bin:/system/bin:/system/xbin")
         appendLine()
         appendLine("## 你能用的命令")
@@ -126,7 +131,11 @@ object AgentSystemPrompt {
         }
         appendLine()
         if (capabilities != null) {
-            val byOrigin = capabilities.describeByOrigin()
+            // ★ 核心模式用**短用法**：完整参数形态一行能到上百字符（agent-memory 那种），
+            //   而核心模式存在的意义就是「装进两千字符的网关预算」——
+            //   写详细了装不下，删掉这条能力更糟（模型压根不知道它存在）。
+            //   完整形态让模型按需问命令（能力失败时会把完整用法回给它）或查技能文档。
+            val byOrigin = capabilities.describeByOrigin(short = commandDetail == CommandDetail.CORE)
             val termux = byOrigin[CapabilityOrigin.TERMUX].orEmpty()
             val internal = byOrigin[CapabilityOrigin.INTERNAL].orEmpty()
             if (termux.isNotEmpty()) {
@@ -137,6 +146,11 @@ object AgentSystemPrompt {
             if (internal.isNotEmpty()) {
                 appendLine("### 3) SDK 自制的命令（不在 Termux:API 里，别去别处找）")
                 internal.forEach { appendLine("- $it") }
+                // ★ 这里**不**再额外解释「记忆用 agent-memory 改、文本用 agent-text 改」——
+                //   能力清单里本来就有这两条命令（`- agent-memory …` / `- agent-text …`），
+                //   模型看得见就够知道了；再写一遍纯多花几十字符，
+                //   而核心模式的预算只剩几十字符。
+                //   行级补丁的用法细节在技能文档里（skills/agent-memory/SKILL.md）。
                 appendLine()
             }
         }

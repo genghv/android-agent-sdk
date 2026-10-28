@@ -33,12 +33,43 @@ agent-memory list                       # 有哪些记忆（id / 时间 / 标题
 agent-memory get 20261028-1432          # 读某一条正文
 agent-memory search 网关                # 按关键词找（标题或正文命中，不区分大小写）
 agent-memory add "用户确认：灌溉阈值按 80"   # 记一条新的
-agent-memory edit 20261028-1432 "改成：阈值按 60"  # 改一条
+agent-memory edit 20261028-1432 "改成：阈值按 60"  # 整条替换
+agent-memory patch 20261028-1432 "replace-lines 2 2 阈值按 60"  # ★ 只改某几行
 agent-memory delete 20261028-1432       # 删一条
 ```
 
 输出是 JSON，字段：`ok` / `id` / `title` / `chars` / `summary` / `entries` / `count`。
 失败时 `ok:false` 且带 `error`，退出码非 0。
+
+### 改记忆：整条替换 vs 按行改
+
+`edit` 是**整条替换** —— 你得把整段正文重新打一遍。这有两个问题：
+每次输出都是一次重新生成，**措辞会漂**（同一件事今天这么写明天那么写）；
+而且长正文每次全量输出，token 成本高。
+
+`patch` 只改**你指定的那几行**，其余原样不动：
+
+```bash
+# 改第 2 行（行号从 1 开始）
+agent-memory patch 20261028-1432 "replace-lines 2 2 阈值按 60"
+
+# 改第 2-3 行
+agent-memory patch 20261028-1432 "replace-lines 2 3 阈值按 60\n每三天浇一次"
+
+# 在第 1 行后面插入一行
+agent-memory patch 20261028-1432 "insert-after 1 这是补充：只在晴天浇"
+
+# 删掉第 4 行
+agent-memory patch 20261028-1432 "delete-line 4"
+
+# 按**内容**定位（锚点可能不止一处，所以整段要加引号）
+agent-memory patch 20261028-1432 "replace-block|阈值按 80|阈值按 60"
+```
+
+规格里的 `\n` 表示真换行。`replace-block` 的锚点用 `|` 分隔（两边都要写清楚），
+**命中多处会报错并列出候选行号** —— 那说明锚点写得不够具体，多带几行上下文即可。
+
+改完会回一个 `diff`（哪几行被改了），对着它确认改对了没有。
 
 ### 什么时候该写 / 改
 

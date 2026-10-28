@@ -51,12 +51,22 @@ import java.io.File
  * `segments/` 重建），链就全丢了，而正文还在。
  * 推导式版本没有这个问题：索引坏不坏都不影响链。
  *
- * ⇒ 索引其实只是**缓存**（列��快一点）。正文才是本体。
+ * ⇒ 索引其实只是**缓存**（列表快一点）。正文才是本体。
  *
  * ## 排序
  *
  * 列表按「新的在前」。时间完全相同（同一毫秒追加多段）时按 id 兜底，
  * 所以 id 里那段序号是**补零**的（`-002`），字典序 == 追加顺序。
+ *
+ * ## ★ 容量上限（机械规则，不问 AI）
+ *
+ * 归档段是「被摘要掉的对话原文」—— 每压一次长一段，不设上限的话 App 会一直变大。
+ * [applyLimits] 记下两个上限（段数 / 总字符），之后每次 [append] 后**自动淘汰**：
+ *
+ * - 超段数 ⇒ 删**最旧**的段；超总字符 ⇒ 同样删**最旧**的段，删到不超为止；
+ * - ★ **最新的一段永不删**（哪怕只剩它 —— 那是当前正在用的历史）；
+ * - 删段 = 删 `segments/<id>.json` + 从索引移除（不留幽灵条目，也不留孤儿文件）；
+ * - 删完**链重新推导** —— 链本来就是现算的（[linkChain]），剩下的段自动串好。
  */
 class ArchiveStore(private val root: File) {
 
@@ -64,6 +74,22 @@ class ArchiveStore(private val root: File) {
     private val segmentsDir = File(root, SEGMENTS_DIR)
 
     private val json = Json { prettyPrint = false; encodeDefaults = true }
+
+    /** 段数上限；<= 0 = 不限（默认不限 —— 没设上限就不该偷偷删用户的历史）。 */
+    private var maxSegments: Int = 0
+
+    /** 所有段正文的总字符上限；<= 0 = 不限。 */
+    private var maxChars: Int = 0
+
+    /**
+     * 这个实例**分配过**的 id —— 已经被淘汰掉的段也算。
+     *
+     * ★ 为什么不能只看「现在还在的段」：段被淘汰之后 id 就空出来了，
+     *   同一秒里再追加一段会**复用**这个 id ⇒ 前端拿着旧 id 读回来的是
+     *   另一段的内容（而且同毫秒追加的先后顺序也会排错）。
+     *   ⇒ id 一旦用过就不再复用。
+     */
+    private val usedIds = LinkedHashSet<String>()
 
     // ---- 写 ----
 
@@ -78,6 +104,9 @@ class ArchiveStore(private val root: File) {
      *
      * ⚠️ 返回的是**快照**：之后再追加别的段，这份快照里的 `nextId` 就过期了
      * （早段的 `nextId` 会指向新段）。要最新状态就去 [meta] / [list] 读。
+     *
+     * ★ 设了容量上限（[applyLimits]）的话，追加完**立刻**淘汰超限的最旧段 ——
+     * 刚追加的这一段永远不会被删（它是当前正在用的历史）。
      */
     fun append(
         kind: String,
@@ -88,6 +117,7 @@ class ArchiveStore(private val root: File) {
         val now = System.currentTimeMillis()
         val existing = readIndex()
         val id = newId(now, takenIds(existing))
+        usedIds.add(id)   // ★ 用过的 id 就不再复用（哪怕后来被淘汰掉了）
         val meta = ArchiveSegmentMeta(
             id = id,
             createdAt = now,
@@ -100,8 +130,11 @@ class ArchiveStore(private val root: File) {
             chars = charsOf(messages),
         )
         writeSegment(meta, messages)
+        // ★ 容量上限：追加完**立刻**淘汰超限的最旧段（机械规则，不问 AI）。
+        //   删掉的段：正文文件真删 + 索引里不留条目 + 链重新串好。
+        val kept = enforceLimits(linkChain(listOf(meta) + existing), protectId = meta.id)
         // 整份索引重写：链是推导出来的，重写一次就把链刷新了。
-        writeIndex(linkChain(listOf(meta) + existing))
+        writeIndex(kept)
         return meta
     }
 
@@ -143,6 +176,38 @@ class ArchiveStore(private val root: File) {
 
     /** 一共有多少段。 */
     fun size(): Int = readIndex().size
+
+    /**
+     * 设容量上限：**段数** / **总字符**。<= 0 = 不限。
+     *
+     * ★ **上限是硬线，设了立刻生效** —— 调用它就按新上限收拾一遍已有的段
+     * （超了就删最旧的），之后每次 [append] 再检查一次。
+     *
+     * 为什么「设了就删」而不是「等下次追加才删」：
+     * 宿主把上限调小，意思就是「我不要这么多历史了」——
+     * 要是等到下次追加才生效，中间这一段时间 App 仍然是超的。
+     * （另一个理由：它得和记忆库那套 [ai.agentkernel.memory.MemoryStore.applyLimits]
+     * **语义一致** —— 两个同名方法一个立即生效一个不生效，是个坑。）
+     *
+     * @param maxSegments 最多留几段；<= 0 = 不限。
+     * @param maxChars 所有段正文的总字符上限；<= 0 = 不限。
+     */
+    fun applyLimits(maxSegments: Int, maxChars: Int) {
+        this.maxSegments = maxSegments
+        this.maxChars = maxChars
+        val existing = readIndex()
+        if (existing.isEmpty()) return
+        // 整份索引重写：删掉的段不留条目，链也重新串好。
+        writeIndex(enforceLimits(linkChain(existing), protectId = null))
+    }
+
+    /**
+     * 所有归档段的**总字符数**（正文之和）。
+     *
+     * 口径 = [charsOf]：每段的字数在 [append] 时就按同一套算法算好记在元信息里（`chars`），
+     * 这里只是求和 —— 不另写一套口径。
+     */
+    fun totalChars(): Int = readIndex().sumOf { it.chars }
 
     /** 归档目录（给宿主/agent 看路径用）。 */
     fun rootDir(): File = root
@@ -203,6 +268,54 @@ class ArchiveStore(private val root: File) {
         }
     }
 
+    /**
+     * 容量上限：超了就删**最旧**的段（机械规则，不问 AI）。
+     *
+     * - 段数超 [maxSegments] ⇒ 删最旧的；
+     * - 总字符超 [maxChars] ⇒ 同样删最旧的，删到不超为止；
+     * - ★ **最新的一段永不删** —— 那是当前正在用的历史。
+     *
+     * 一次只删一段，删完重新统计 —— 段数和字符是**同一个循环**里的两个条件，
+     * 谁超就删谁（删的总是最旧的那一段，所以最后留下的集合是一样的）。
+     *
+     * @param linked 按「新的在前」排好、带链的段。
+     * @param protectId 刚追加的那一段（保护它：它就是当前正在用的历史）。
+     * @return 淘汰后剩下的段（**重新串过链**）。
+     */
+    private fun enforceLimits(linked: List<ArchiveSegmentMeta>, protectId: String?): List<ArchiveSegmentMeta> {
+        if (linked.isEmpty()) return linked
+        if (maxSegments <= 0 && maxChars <= 0) return linked
+        var kept = linked
+        while (kept.size > 1) {
+            val overCount = maxSegments > 0 && kept.size > maxSegments
+            val overChars = maxChars > 0 && kept.sumOf { it.chars } > maxChars
+            if (!overCount && !overChars) break
+            // 最旧的一段 = 列表的**最后一个**（列表是「新的在前」）。
+            // ★ 刚追加的那段、以及按时间算最新的那段，都不删 ——
+            //   哪怕它自己就超了字符上限，也留着（那是正在用的历史）。
+            val newestId = kept.firstOrNull()?.id
+            val victim = kept.lastOrNull { it.id != protectId && it.id != newestId } ?: break
+            deleteSegment(victim.id)
+            kept = kept.filterNot { it.id == victim.id }
+        }
+        // ★ 链重新推导：链本来就是现算的（[linkChain]）——
+        //   删掉一段之后，剩下的段自动串好（被删段的邻居直接连上）。
+        return linkChain(kept)
+    }
+
+    /**
+     * 删掉一段的**正文文件**（索引里的条目由调用方重写时一并去掉）。
+     *
+     * 文件是真删 —— 只从索引里拿掉的话，索引一坏 [rebuildIndex] 会把它**捡回来复活**。
+     */
+    private fun deleteSegment(id: String) {
+        val file = File(segmentsDir, "$id.json")
+        // 索引里的 id 要是坏了，也不能让删除操作跑到 segments/ 外面去。
+        val inside = runCatching { file.canonicalFile.parentFile == segmentsDir.canonicalFile }.getOrDefault(false)
+        if (!inside) return
+        if (file.isFile) file.delete()
+    }
+
     private fun writeIndex(metas: List<ArchiveSegmentMeta>) {
         root.mkdirs()
         val body = buildJsonObject {
@@ -245,12 +358,14 @@ class ArchiveStore(private val root: File) {
     )
 
     /**
-     * 已经用掉的 id —— **索引和正文目录都算**。
+     * 已经用掉的 id —— **索引、正文目录、这个实例分配过的都算**。
      *
      * 只看索引会漏：索引坏了的时候新段可能和正文里的重名 ⇒ 覆盖掉历史。
+     * 只看「现在还在的」也会漏：被淘汰掉的段 id 不能再用（会「复活」成另一段）。
      */
     private fun takenIds(indexed: List<ArchiveSegmentMeta>): Set<String> {
         val ids = LinkedHashSet<String>()
+        ids.addAll(usedIds)
         indexed.forEach { ids.add(it.id) }
         segmentsDir.listFiles { f -> f.isFile && f.name.endsWith(".json") }?.forEach { f ->
             ids.add(f.name.removeSuffix(".json"))

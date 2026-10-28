@@ -8,6 +8,7 @@ import ai.agentkernel.prefix.PrefixLayout
 import ai.agentkernel.workspace.Quota
 import ai.agentkernel.workspace.WorkspacePolicy
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -30,6 +31,11 @@ class AgentSystemPromptTest {
         listOf(
             Fake("torch", CapabilityOrigin.TERMUX),
             Fake("cleanup", CapabilityOrigin.INTERNAL),
+            // ★ 记忆与文本这两条也要在 —— 提示词里「agent 知道有这两条命令」这件事，
+            //   来源应该是**能力清单**（清单里真列着它们），不是某句额外的说明文案。
+            //   靠说明文案撑着的话，那句话一删，命令就等于不存在了。
+            Fake("memory", CapabilityOrigin.INTERNAL),
+            Fake("text", CapabilityOrigin.INTERNAL),
         )
     )
 
@@ -45,6 +51,32 @@ class AgentSystemPromptTest {
         assertFalse(text.contains(layout.home), "HOME 用相对写法，不重复绝对路径：\n$text")
         assertFalse(text.contains(layout.prefix), "PREFIX 用相对写法")
         assertFalse(text.contains(layout.trash), "回收站用相对写法")
+        assertFalse(text.contains(layout.varDir), "var 用相对写法")
+        // 整个提示词里**只该出现一次**绝对路径 —— 出现第二次就说明有人把子路径写死了，
+        // 而那正是这份提示词当初要省下来的字数。
+        assertEquals(
+            1,
+            text.split(layout.agentRoot).size - 1,
+            "绝对路径只该出现一次：\n$text",
+        )
+    }
+
+    @Test
+    fun `记忆和归档的目录要写进环境段`() {
+        val text = AgentSystemPrompt.build(layout, capabilities)
+        // 不知道记忆/归档落在哪儿，模型只会去猜 —— 猜错了就把「自己的记忆」写进工作区乱堆。
+        assertTrue(text.contains("\$AGENT_VAR"), "要告诉 agent 记忆与归档在哪儿：\n$text")
+        assertTrue(text.contains("\$AGENT_ROOT/var"), "var 要用相对写法拼：\n$text")
+        assertTrue(text.contains("memory/"), "要说明长期记忆的子目录")
+        assertTrue(text.contains("archive/"), "要说明会话归档的子目录")
+    }
+
+    @Test
+    fun `记忆和文本改写的命令要出现在命令段`() {
+        val text = AgentSystemPrompt.build(layout, capabilities)
+        // 有了 agent-memory / agent-text，模型才知道「改记忆」和「改文件」不用手写 shell。
+        assertTrue(text.contains("agent-memory"), "要告诉模型记忆怎么查改：\n$text")
+        assertTrue(text.contains("agent-text"), "要告诉模型文本文件怎么改")
     }
 
     @Test

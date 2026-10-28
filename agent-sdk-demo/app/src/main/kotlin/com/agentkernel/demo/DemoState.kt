@@ -17,6 +17,8 @@ import ai.agentkernel.llm.openai.EffortCatalogClient
 import ai.agentkernel.llm.openai.LlmAuth
 import ai.agentkernel.memory.ContextMemory
 import ai.agentkernel.memory.ContextPolicy
+import ai.agentkernel.memory.MemoryEntry
+import ai.agentkernel.memory.MemoryKind
 import ai.agentkernel.memory.MemoryStore
 import ai.agentkernel.prompt.AgentSystemPrompt
 import ai.agentkernel.protocol.AssistantMessage
@@ -26,6 +28,8 @@ import ai.agentkernel.protocol.ToolMessage
 import ai.agentkernel.protocol.UserMessage
 import android.app.Application
 import android.content.Context
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -127,6 +131,14 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      */
     val memoryCaps = AndroidAgentSdk.memoryCapabilities(context)
 
+    /**
+     * 文本文件能力（`agent-text`）：按**行**读 / 改沙箱里的文本文件。
+     *
+     * 路径由 SDK 算（[AndroidAgentSdk.textCapabilities]）—— 别自己拼，
+     * 拼错了会「命令写进 A 目录、能力从 B 目录读」，表现成「改了没反应」。
+     */
+    val textCaps = AndroidAgentSdk.textCapabilities(context)
+
     /** 能力注册表：与《接入指南》里宿主该用的完全一样。 */
     val capabilities: DeviceCapabilityRegistry = DeviceCapabilityRegistry(
         defaultDeviceCapabilities(
@@ -134,6 +146,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
             workspace = workspace,
             http = http,
             memory = memoryCaps,
+            text = textCaps,
         )
     )
 
@@ -311,6 +324,33 @@ class DemoState(app: Application) : AndroidViewModel(app) {
 
     val capabilityResults = mutableStateListOf<CommandResult>()
 
+    /**
+     * `agent-text` 的清单条目 —— **用法行照 SDK 能力给的原文**。
+     *
+     * 为什么清单里放的是「用法行」而不是一条具体命令：
+     * 这条命令的参数是**子命令 + 相对路径 + 补丁规格**，写死一条例子反而不准；
+     * 用法行才是模型真正会用到的形状（SDK 的提示词里也是这一行）。
+     *
+     * ★ 但它**必须真的注册**（见 [capabilities]）：注册了，
+     *   提示词里才会有这一行，模型才知道 `agent-text` 存在。
+     */
+    val agentTextSpec = CapabilitySpec(
+        key = "agent-text",
+        title = "文本文件",
+        subtitle = "读 / 按行改沙箱里的文本文件（agent 改文件不用重贴全文）",
+        command = AGENT_TEXT_USAGE,
+        icon = Icons.Filled.ContentCopy,
+    )
+
+    /**
+     * 「SDK 自制命令」那份清单 = 清单文件里那批 **+ 本轮新增的 `agent-text`**。
+     *
+     * 能力台显示的与自检跑的是**同一份**（两份清单对不上，
+     * 自检就变成在验一份界面上根本没有的东西）。
+     */
+    val internalCommandSpecs: List<CapabilitySpec> =
+        CapabilityCatalog.internalCommands + listOf(agentTextSpec)
+
     // ---- 自检 ----
 
     val checks = mutableStateListOf<CheckItem>()
@@ -483,6 +523,76 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 }
             },
         )
+    }
+
+    // ---- 记忆页（两块：今天的摘要 / 你自己记下的事） ----
+
+    /**
+     * 今天的摘要（**每日摘要槽** —— 每天一条，新摘要会替换当天那条）。
+     *
+     * null = 今天还没有摘要。
+     */
+    var memoryDaily by mutableStateOf<MemoryEntry?>(null)
+        private set
+
+    /** agent 自己记下的**日常条目**（新的在前）。 */
+    val memoryNotes = mutableStateListOf<MemoryEntry>()
+
+    /** 记忆页上次加载的时刻（0 = 还没加载过）。 */
+    var memoryLoadedAt by mutableStateOf(0L)
+        private set
+
+    /**
+     * 记忆仓库（**路径与 SDK 内部那份一致** —— 同一个常量算出来的）。
+     *
+     * 宿主自己开一份是给「翻旧记忆」用的；它和 `agent-memory` 命令、
+     * SDK 内部的 [ContextMemory] 读写的是**同一批文件**。
+     */
+    private fun memoryStore(): MemoryStore =
+        MemoryStore(File(executor.layout.varDir, AndroidAgentSdk.MEMORY_DIR))
+
+    /**
+     * 加载记忆页的两块。
+     *
+     * ★ 口径**照抄 SDK 的 `MemoryStore.digest()`**：摘要 = 最新的每日槽，
+     *   日常 = 追加式条目（新的在前）。
+     *   界面上这两块必须和**提示词里那一块**同口径 ——
+     *   否则用户看到的和模型看到的不是一回事，没法对照。
+     */
+    fun loadMemory() {
+        viewModelScope.launch {
+            val all = withContext(Dispatchers.IO) { memoryStore().list() }
+            memoryDaily = all.filter { it.kind == MemoryKind.DAILY }
+                .maxWithOrNull(compareBy<MemoryEntry>({ it.createdAt }, { it.id }))
+            val notes = all.filter { it.kind == MemoryKind.NOTE }
+                .sortedWith(compareByDescending<MemoryEntry> { it.createdAt }.thenByDescending { it.id })
+            memoryNotes.clear()
+            memoryNotes.addAll(notes)
+            memoryLoadedAt = System.currentTimeMillis()
+            log(
+                "MEM",
+                "记忆页加载：摘要=${memoryDaily?.id ?: "(无)"} 日常=${memoryNotes.size} 条",
+            )
+        }
+    }
+
+    /**
+     * `agent-text` 的**真例子**（能力台那张卡片点下去跑的就是它）。
+     *
+     * 为什么不是直接跑卡片上那行：卡片显示的是**用法行**
+     * （`agent-text <read <相对路径>|patch <相对路径> <补丁规格>>`），
+     * 它不是一条可执行命令 —— 照着跑只会得到「不认识的子命令」。
+     */
+    suspend fun runAgentTextDemo(): CommandResult {
+        val file = ".agent-text-demo.txt"
+        runCommand("文本 · 准备", "cat > $file << 'EOF'\n第一行\n第二行\nEOF")
+        val r = runCommand(
+            "文本文件",
+            "agent-text patch home/$file \"replace-lines 2 2 改过的第二行\" && agent-text read home/$file",
+        )
+        // 演示不留垃圾。
+        runCommand("文本 · 清理", "rm -f $file")
+        return r
     }
 
     // ---- 手电筒（开关，不是「只能开」） ----
@@ -724,6 +834,37 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 )
                 log("CHECK", "${if (removed) "✅" else "❌"} SDK 自制命令·自检不留垃圾 | id=$id | ${rm.output}")
             }
+
+            // 4b) `agent-text`：SDK 自制的**行级改文件**命令 —— 真读真写一个临时文件。
+            //
+            //    ★ 判据不是「没报错」，而是「写进去的读得回来」：
+            //    两条能力调用都得回 ok:true（复合命令里能力先跑、结果由 shell 打印），
+            //    只回一次说明有一条其实没成。
+            //
+            //    ★ 临时文件放在 home/ 下 —— `agent-text` 的相对路径是**相对沙箱根**的，
+            //      而 shell 的工作目录恰好就是 home/，两条路径指的是同一个文件。
+            val textProbeFile = ".agent-text-selfcheck.txt"
+            val textProbeCmd =
+                "agent-text patch home/$textProbeFile \"replace-lines 1 1 第一行\\n第二行\" && " +
+                    "agent-text read home/$textProbeFile"
+            val textProbe = runCommand("SDK 自制命令 · 文本文件", textProbeCmd)
+            val okCount = Regex("\"ok\":true").findAll(textProbe.output).count()
+            val textOk = textProbe.exitCode == 0 && okCount >= 2 && textProbe.output.contains("第一行")
+            checks += CheckItem(
+                title = "SDK 自制命令 · 文本文件",
+                detail = "写一个临时文件再读回来 —— agent-text 的读与写都要真的跑通",
+                command = textProbeCmd,
+                verdict = if (textOk) Verdict.PASS else Verdict.FAIL,
+                output = textProbe.output.ifBlank { "（无输出，退出码 ${textProbe.exitCode}）" },
+                elapsedMs = textProbe.elapsedMs,
+            )
+            log(
+                "CHECK",
+                "${if (textOk) "✅" else "❌"} SDK 自制命令·文本文件 | exit=${textProbe.exitCode} | " +
+                    "ok:true×$okCount | ${textProbe.output}",
+            )
+            // 自检不留痕：临时文件用完即删。
+            runCommand("临时文件 · 删掉自检造的那个", "rm -f $textProbeFile")
 
             // 5) 配额闭环：agent 自己把配额改小 → 工作区立刻变成「超限」→ 改回默认
             //    （这正是「超限注入告警让 agent 自己维护」那条链路的可观测部分）
@@ -1352,6 +1493,145 @@ class DemoState(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * 行级补丁自检（`agent-memory patch` / `agent-text patch`）。
+     *
+     * 验四件事：
+     * 1. **`agent-memory patch` 能改一行**：diff 带回行号；读回来第 2 行确实变了、**其它行没变**；
+     * 2. **`agent-text patch` 能改一行**：同上；
+     * 3. **失败要如实报错**：锚点找不到 ⇒ ok=false 且说清是锚点问题（不能谎报成功）；
+     * 4. **路径沙箱**：`..` 不给过（不许写到 agent 根外面）。
+     *
+     * ★ 这些断言**全部走命令**（[runCommand]）—— 这一轮验的就是「命令能用」，
+     *   直接调 SDK 内部方法绕过命令层，等于没验。
+     *
+     * ```
+     * adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity \
+     *     --ez autorun_patch true
+     * adb logcat -d -s AgentSdkDemo
+     * ```
+     */
+    fun startPatchCheck() {
+        DemoRuntime.startOncePerProcess("patchcheck") { runPatchCheck() }
+    }
+
+    suspend fun runPatchCheck() {
+        val results = mutableListOf<Pair<String, Boolean>>()
+
+        fun item(name: String, ok: Boolean, detail: String) {
+            results += name to ok
+            logPatch(name, ok, detail)
+            checks += CheckItem(
+                title = name,
+                detail = detail,
+                command = "(行级补丁)",
+                verdict = if (ok) Verdict.PASS else Verdict.FAIL,
+                output = detail,
+                elapsedMs = 0,
+            )
+        }
+
+        // ---- ① `agent-memory patch`：改一行，其它行不动 ----
+        //
+        // 正文要**多行**，但命令层的参数按空白拆词（真换行会被当操作符），
+        // 所以多行正文靠一次 replace-lines 铺出来：补丁规格里的 \n 表示真换行。
+        val add = runCommand("记忆 · 写一条", "agent-memory add \"自检记忆第一行\"")
+        val memoryId = Regex("\"id\":\"([^\"]+)\"").find(add.output)?.groupValues?.get(1)
+        if (memoryId == null) {
+            item("memory-patch", false, "写不进记忆：exit=${add.exitCode} ${add.output}")
+        } else {
+            runCommand(
+                "记忆 · 铺成多行",
+                "agent-memory patch $memoryId \"replace-lines 1 1 第一行\\n第二行\\n第三行\"",
+            )
+            val patch = runCommand(
+                "记忆 · 改第 2 行",
+                "agent-memory patch $memoryId \"replace-lines 2 2 改过的第二行\"",
+            )
+            val diff = Regex("\"diff\":\"([^\"]*)\"").find(patch.output)?.groupValues?.get(1)
+            // 读回来看**真正文**：命令层的 JSON 里换行是转义的，按行比对得用真文本。
+            val body = memoryStore().readBody(memoryId).orEmpty()
+            val lines = body.lines()
+            val got = runCommand("记忆 · 读回来", "agent-memory get $memoryId")
+            val okTrue = patch.output.contains("\"ok\":true")
+            val diffHasLine = diff != null && Regex("第\\s*\\d+\\s*行").containsMatchIn(diff)
+            val line2 = lines.getOrNull(1)
+            val othersKept = lines.getOrNull(0) == "第一行" && lines.getOrNull(2) == "第三行"
+            val seen = got.output.contains("改过的第二行")
+            item(
+                "memory-patch",
+                okTrue && diffHasLine && line2 == "改过的第二行" && othersKept && seen,
+                "ok=true=$okTrue · diff=${diff ?: "(没有)"} · 第2行=$line2 · " +
+                    "其它行未变=$othersKept · 读回命令看得到=$seen",
+            )
+            // 自检不留痕：这条记忆是自检造的，用完删掉。
+            runCommand("记忆 · 删掉自检造的那条", "agent-memory delete $memoryId")
+        }
+
+        // ---- ② `agent-text patch`：改一行，其它行不动 ----
+        //
+        // 相对路径是**相对沙箱根**的；shell 的工作目录是 home/ ⇒ `home/x` 与 `x` 同一个文件。
+        val textFile = ".patch-selfcheck.txt"
+        val wrote = runCommand(
+            "文本 · 造一个多行文件",
+            "cat > $textFile << 'EOF'\n第一行\n第二行\n第三行\nEOF",
+        )
+        val textPatch = runCommand(
+            "文本 · 改第 2 行",
+            "agent-text patch home/$textFile \"replace-lines 2 2 改过的第二行\"",
+        )
+        val textDiff = Regex("\"diff\":\"([^\"]*)\"").find(textPatch.output)?.groupValues?.get(1)
+        val readBack = runCommand("文本 · 读回来", "cat $textFile")
+        val textLines = readBack.output.lines()
+        val textOkTrue = textPatch.output.contains("\"ok\":true")
+        val textDiffHasLine = textDiff != null && Regex("第\\s*\\d+\\s*行").containsMatchIn(textDiff)
+        val textLine2 = textLines.getOrNull(1)
+        val textOthersKept = textLines.getOrNull(0) == "第一行" && textLines.getOrNull(2) == "第三行"
+        item(
+            "text-patch",
+            wrote.exitCode == 0 && textOkTrue && textDiffHasLine &&
+                textLine2 == "改过的第二行" && textOthersKept,
+            "写入=${wrote.exitCode == 0} · ok=true=$textOkTrue · diff=${textDiff ?: "(没有)"} · " +
+                "第2行=$textLine2 · 其它行未变=$textOthersKept",
+        )
+
+        // ---- ③ 失败要如实报错：锚点找不到 ----
+        val anchor = runCommand(
+            "文本 · 锚点不存在",
+            "agent-text patch home/$textFile \"replace-block|不存在的锚点|新内容\"",
+        )
+        val anchorFailed = anchor.exitCode != 0 && anchor.output.contains("\"ok\":false")
+        val anchorExplained = anchor.output.contains("锚点")
+        item(
+            "text-patch-anchor-fail",
+            anchorFailed && anchorExplained,
+            "ok=false=$anchorFailed · 说清是锚点问题=$anchorExplained · exit=${anchor.exitCode} · " +
+                anchor.output,
+        )
+
+        // ---- ④ 路径沙箱：不许写到 agent 根外面 ----
+        val escape = runCommand(
+            "文本 · 越界路径",
+            "agent-text patch ../逃逸.txt \"replace-lines 1 1 越界\"",
+        )
+        val escapedFile = File(context.filesDir, "逃逸.txt")
+        val escapeFailed = escape.exitCode != 0 && escape.output.contains("\"ok\":false")
+        val nothingOutside = !escapedFile.exists()
+        item(
+            "text-patch-escape",
+            escapeFailed && nothingOutside,
+            "ok=false=$escapeFailed · 根外没落文件=$nothingOutside · exit=${escape.exitCode} · " +
+                escape.output,
+        )
+
+        // 自检不留痕：临时文件用完即删。
+        runCommand("文本 · 删掉自检造的那个", "rm -f $textFile")
+
+        val pass = results.count { it.second }
+        val fail = results.size - pass
+        log("SUMMARY", "合计 ${results.size} 项：✅ $pass · ❌ $fail")
+    }
+
+    /**
      * 命令行触发的**多轮**对话（自动化用）。
      *
      * ## 为什么必须有多轮
@@ -1459,12 +1739,27 @@ class DemoState(app: Application) : AndroidViewModel(app) {
 
         /** 思考强度的**强度编码**（不是 key / index —— 那两个换模型就失效）。 */
         const val KEY_STRENGTH = "reasoning_strength"
+
+        /** `agent-text` 的用法行（与 SDK 能力给的 usage 一字不差）。 */
+        const val AGENT_TEXT_USAGE = "agent-text <read <相对路径>|patch <相对路径> <补丁规格>>"
     }
 }
 
 /** 自检结果写 logcat（tag 固定，方便脚本抓）。 */
 private fun log(tag: String, message: String) {
     android.util.Log.i("AgentSdkDemo", "[$tag] $message")
+}
+
+/**
+ * 补丁自检的一行日志 —— **机器可读**：`PATCH|名字=OK` / `PATCH|名字=FAIL:原因`。
+ *
+ * 为什么不用上面那个 [log]：它给的是 `[TAG] 正文`，
+ * 而这一组断言要被脚本按「名字=结论」抓 —— 结论必须在**等号后面**，
+ * 括号包着就没法直接切分了。
+ */
+private fun logPatch(name: String, ok: Boolean, detail: String) {
+    val body = if (ok) "OK | $detail" else "FAIL:$detail"
+    android.util.Log.i("AgentSdkDemo", "PATCH|$name=$body")
 }
 
 /**

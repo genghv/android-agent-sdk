@@ -2,8 +2,10 @@ package ai.agentkernel.memory
 
 import ai.agentkernel.archive.ArchiveSegmentMeta
 import ai.agentkernel.archive.ArchiveStore
+import ai.agentkernel.llm.LlmClient
 import ai.agentkernel.protocol.AssistantMessage
 import ai.agentkernel.protocol.ChatMessage
+import ai.agentkernel.protocol.ChatRequest
 import ai.agentkernel.protocol.SystemMessage
 import ai.agentkernel.protocol.ToolCall
 import ai.agentkernel.protocol.ToolMessage
@@ -32,7 +34,7 @@ class ContextMemoryTest {
         File(System.getProperty("java.io.tmpdir"), "agentkernel-ctxmem-${System.nanoTime()}").also { it.mkdirs() }
 
     private fun memory(
-        llm: FakeLlm,
+        llm: LlmClient,
         policy: ContextPolicy,
         now: () -> Long,
         archive: ArchiveStore? = null,
@@ -44,6 +46,12 @@ class ContextMemoryTest {
         clock = now,
         archive = archive,
     )
+
+    /** 基准时刻（2026-10-29 前后）；跨天测试在它上面加 [twoDays]。 */
+    private val baseNow: Long = 1_793_203_200_000L
+
+    /** 48 小时 —— 跨它一定是另一个自然日（时区/夏令时都算得过来）。 */
+    private val twoDays: Long = 2L * 24L * 60L * 60L * 1000L
 
     private fun bigHistory(n: Int, size: Int = 60): List<UserMessage> =
         (1..n).map { UserMessage("消息$it " + "x".repeat(size)) }
@@ -320,6 +328,159 @@ class ContextMemoryTest {
         assertEquals(1, mem.memoryStore().list().size)
     }
 
+    // ---- 每日摘要槽（闲置归档写「当天一条」，后来的替换前面的）----
+
+    @Test
+    fun `同一天两次闲置归档只剩一条`() = runBlocking {
+        val llm = ScriptedLlm(listOf("第一段话题的结论", "第二段话题的结论"))
+        var now = baseNow
+        val mem = memory(llm, ContextPolicy(idleArchiveMillis = 60_000), { now })
+
+        // 第一段话题
+        mem.prepare(listOf(UserMessage("第一个问题"), AssistantMessage("回答")), prefixChars = 0)
+        now += 120_000
+        mem.prepare(
+            listOf(UserMessage("第一个问题"), AssistantMessage("回答"), UserMessage("新问题")),
+            prefixChars = 0,
+        )
+        assertEquals(1, mem.memoryStore().list().size, "第一次闲置归档要落一条")
+
+        // 同一天又闲置了一次
+        now += 120_000
+        val plan = mem.prepare(
+            listOf(UserMessage("新问题"), AssistantMessage("第二个回答"), UserMessage("再一个问题")),
+            prefixChars = 0,
+        )
+
+        assertNotNull(plan.archived, "第二次闲置也要归档")
+        assertEquals(
+            1,
+            mem.memoryStore().list().size,
+            "同一天只能有一条每日摘要（后来的替换前面的，不是追加）",
+        )
+    }
+
+    @Test
+    fun `同一天再归档会替换标题和正文`() = runBlocking {
+        val llm = ScriptedLlm(listOf("第一段话题的结论\n细节一", "第二段话题的结论\n细节二"))
+        var now = baseNow
+        val mem = memory(llm, ContextPolicy(idleArchiveMillis = 60_000), { now })
+
+        mem.prepare(listOf(UserMessage("第一个问题"), AssistantMessage("回答")), prefixChars = 0)
+        now += 120_000
+        mem.prepare(
+            listOf(UserMessage("第一个问题"), AssistantMessage("回答"), UserMessage("新问题")),
+            prefixChars = 0,
+        )
+        now += 120_000
+        mem.prepare(
+            listOf(UserMessage("新问题"), AssistantMessage("第二个回答"), UserMessage("再一个问题")),
+            prefixChars = 0,
+        )
+
+        val list = mem.memoryStore().list()
+        assertEquals(1, list.size, "同一天只留一条")
+        val entry = list.single()
+        // ★ 替换的是**整条** —— 标题和正文都得是新的
+        assertTrue(entry.title.contains("第二段话题"), "标题要换成新的：${entry.title}")
+        assertTrue(!entry.title.contains("第一段话题"), "旧标题不该留着：${entry.title}")
+        assertTrue(entry.summary.contains("第二段话题"), "正文要换成新的：${entry.summary}")
+        assertTrue(!entry.summary.contains("第一段话题"), "旧正文不该留着：${entry.summary}")
+    }
+
+    @Test
+    fun `跨天归档是两个不同的槽位`() = runBlocking {
+        val llm = ScriptedLlm(listOf("第一天的话题", "第二天的话题"))
+        var now = baseNow
+        val mem = memory(llm, ContextPolicy(idleArchiveMillis = 60_000), { now })
+
+        mem.prepare(listOf(UserMessage("第一个问题"), AssistantMessage("回答")), prefixChars = 0)
+        now += 120_000
+        mem.prepare(
+            listOf(UserMessage("第一个问题"), AssistantMessage("回答"), UserMessage("新问题")),
+            prefixChars = 0,
+        )
+
+        // 跨天（48 小时 ⇒ 一定是另一个自然日）
+        now += twoDays
+        mem.prepare(
+            listOf(UserMessage("新问题"), AssistantMessage("第二个回答"), UserMessage("再一个问题")),
+            prefixChars = 0,
+        )
+
+        val list = mem.memoryStore().list()
+        assertEquals(2, list.size, "跨天就该是两个槽位（老那天的还在磁盘上）")
+        assertTrue(
+            list.any { it.summary.contains("第一天的话题") },
+            "第一天那条要还在：${list.map { it.summary }}",
+        )
+        assertTrue(
+            list.any { it.summary.contains("第二天的话题") },
+            "第二天要另写一条：${list.map { it.summary }}",
+        )
+    }
+
+    @Test
+    fun `手动归档也写当天的每日摘要槽`() = runBlocking {
+        val llm = ScriptedLlm(listOf("手动归档的结论\n第一次", "手动归档的结论\n第二次"))
+        var now = baseNow
+        val mem = memory(llm, ContextPolicy(idleArchiveMillis = 60_000), { now })
+
+        val first = mem.archiveNow(listOf(UserMessage("问题"), AssistantMessage("回答"), UserMessage("新一轮")))
+        assertNotNull(first)
+        assertEquals(1, mem.memoryStore().list().size, "手动归档也要落一条")
+
+        // 同一天再手动归档一次 ⇒ 还是一条（替换）
+        val second = mem.archiveNow(listOf(UserMessage("问题2"), AssistantMessage("回答2"), UserMessage("新一轮2")))
+        assertNotNull(second)
+        val list = mem.memoryStore().list()
+        assertEquals(1, list.size, "手动归档也是每日槽：同一天只留一条")
+        assertTrue(list.single().summary.contains("第二次"), "正文要被替换成新的：${list.single().summary}")
+        assertTrue(!list.single().summary.contains("第一次"), "旧正文不该留着：${list.single().summary}")
+    }
+
+    @Test
+    fun `压缩出来的摘要不进长期记忆`() = runBlocking {
+        val llm = ScriptedLlm(listOf("压缩出来的会话摘要"))
+        var now = baseNow
+        val mem = memory(llm, ContextPolicy(maxContextChars = 500, keepRecentChars = 100), { now })
+
+        val plan = mem.prepare(bigHistory(20), prefixChars = 0)
+
+        assertTrue(plan.compacted, "超容量就该压缩")
+        assertNotNull(plan.summary, "压缩完要有会话摘要")
+        assertNull(plan.archived, "压缩不是归档")
+        // ★ 压缩摘要进的是**稳定前缀**，不是长期记忆
+        assertEquals(0, mem.memoryStore().list().size, "压缩不写长期记忆")
+    }
+
+    @Test
+    fun `压缩不会在另一天多开一个每日摘要槽`() = runBlocking {
+        val llm = ScriptedLlm(listOf("第一天手动归档的结论", "压缩出来的会话摘要"))
+        var now = baseNow
+        val mem = memory(
+            llm,
+            ContextPolicy(maxContextChars = 500, keepRecentChars = 100, idleArchiveMillis = 60_000),
+            { now },
+        )
+
+        // 第一天：手动归档 ⇒ 占掉当天的每日槽
+        mem.archiveNow(listOf(UserMessage("问题"), AssistantMessage("回答"), UserMessage("新一轮")))
+        assertEquals(1, mem.memoryStore().list().size)
+
+        // 跨天 + 压缩：压缩只进前缀，不该再写一条每日摘要
+        now += twoDays
+        val plan = mem.prepare(bigHistory(20), prefixChars = 0)
+
+        assertTrue(plan.compacted, "该压还是要压")
+        assertEquals(2, llm.requests.size, "一次归档摘要 + 一次压缩")
+        assertEquals(
+            1,
+            mem.memoryStore().list().size,
+            "压缩不写长期记忆（也不该在另一天多开一个每日槽）",
+        )
+    }
+
     // ---- 分段归档（原文留存）----
 
     @Test
@@ -401,5 +562,23 @@ class ContextMemoryTest {
         // 链：更早的那段的 nextId 指向更晚的
         assertEquals(list[0].id, list[1].nextId)
         assertEquals(list[1].id, list[0].prevId)
+    }
+}
+
+/**
+ * 按剧本一句一句回摘要的假模型客户端。
+ *
+ * [FakeLlm] 每次都回同一句 —— 测「同一天后来的替换前面的」得能分清前后两段摘要，
+ * 所以这里按调用顺序回不同的内容。
+ */
+internal class ScriptedLlm(private val replies: List<String>) : LlmClient {
+    val requests = mutableListOf<ChatRequest>()
+    private var index = 0
+
+    override suspend fun complete(request: ChatRequest): AssistantMessage {
+        requests += request
+        val reply = if (index < replies.size) replies[index] else replies.lastOrNull().orEmpty()
+        index++
+        return AssistantMessage(content = reply)
     }
 }

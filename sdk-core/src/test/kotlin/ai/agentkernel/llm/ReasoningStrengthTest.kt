@@ -154,8 +154,18 @@ class ReasoningStrengthTest {
         assertNull(catalog.defaultStrength)
     }
 
+    // ⚠️ 这里必须显式写 `: Unit`。
+    //
+    // 写成 `fun x() = runBlocking { assertFailsWith<...> { ... } }` 时，
+    // 表达式体的最后一个表达式是 `assertFailsWith` 的返回值（那个异常对象），
+    // 于是 Kotlin 把方法推断成**返回异常对象** ⇒ 编译出的 JVM 方法不是 `void`
+    // ⇒ **JUnit 4 直接不认这条测试，既不执行也不报错** ——
+    // 套件照样全绿，但这条断言从来没跑过。
+    //
+    // 同理，任何 `@Test` 的表达式体若以非 Unit 结尾，都会这样静默消失。
+    // `TestVoidReturnTest` 会把整个测试源码集扫一遍，挡住这类漏网。
     @Test
-    fun `清单不是合法 JSON 时报错`() = runBlocking {
+    fun `清单不是合法 JSON 时报错`(): Unit = runBlocking {
         assertFailsWith<EffortCatalogException> { client("not json").fetch() }
     }
 

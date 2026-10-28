@@ -75,7 +75,7 @@ class AgentKernel(
      * 上下文体检器（逐次请求比对前缀有没有被动过）。
      *
      * 它是「上下文检测」的执行者：命中低的时候，靠它区分
-     * 「缓存还没建起来」与「**我们自己把前缀改坏了**」。
+     * 「缓存还没建起来」与「**自己把前缀改坏了**」。
      */
     private val inspector: ContextInspector = ContextInspector(),
     /**
@@ -83,7 +83,7 @@ class AgentKernel(
      *
      * 服务端靠它记住「这个会话上一次请求长什么样」，从而**独立**复核
      * 「这一轮是不是上一轮的追加扩展」—— 也就是上游前缀缓存还剩多少。
-     * dsh 那边也是把 sessionId 随请求带的（见 agent.ts 的 buildRequest）。
+     * 服务端也是把 sessionId 随请求带的，据此记住「这个会话上一次请求长什么样」。
      */
     private val sessionId: String? = null,
 ) {
@@ -117,6 +117,7 @@ class AgentKernel(
                     usage,
                     report,
                     prefixReport,
+                    added = appended,
                 )
             }
 
@@ -144,7 +145,7 @@ class AgentKernel(
             onEvent(KernelEvent.Assistant(assistant))
 
             if (assistant.toolCalls.isEmpty()) {
-                return TurnResult(history + appended, TurnStop.COMPLETED, assistant.content, usage, report, prefixReport)
+                return TurnResult(history + appended, TurnStop.COMPLETED, assistant.content, usage, report, prefixReport, added = appended)
             }
 
             for (call in assistant.toolCalls) {

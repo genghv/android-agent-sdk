@@ -106,8 +106,8 @@ class AgentSystemPromptTest {
 
     @Test
     fun `宿主补充说明要拼进去`() {
-        val text = AgentSystemPrompt.build(layout, capabilities, extraNotes = "内部接口基地址：https://x.corp/api")
-        assertTrue(text.contains("https://x.corp/api"))
+        val text = AgentSystemPrompt.build(layout, capabilities, extraNotes = "宿主接口基地址：https://host.example/api")
+        assertTrue(text.contains("https://host.example/api"))
     }
 
     @Test

@@ -15,7 +15,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * 线格式契约测试 —— 锁的是「真实网关认的形状」，不是「我们自己想的形状」。
+ * 线格式契约测试 —— 锁的是「真实网关认的形状」，不是「想象的形状」。
  *
  * 基准是 DeepSeek 官方线格式那份**拿 live 流校验过**的实现
  * （harness 仓库 `packages/llm/llm-deepseek/src/types.ts` 与同目录 `serialize.ts`，

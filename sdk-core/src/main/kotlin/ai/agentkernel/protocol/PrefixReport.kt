@@ -14,10 +14,10 @@ package ai.agentkernel.protocol
  * App 的本地检测器**全绿**，而上游的前缀缓存**已经清零**，
  * 用户只看到「命中率突然掉到 0」，没人知道是哪一处改动造成的。
  *
- * dsh 对这个问题的答案是**另起一份独立视角复核**：
- * `packages/core/agent-loop/src/invariant.ts` 里重新算一遍会话、再和实际请求逐字比，
+ * 通用做法是**另起一份独立视角复核**：
+ * 重新算一遍会话、再和实际请求逐字比，
  * 注释写得很直白 —— *the live cache cannot vouch for itself*（活着的缓存自己没法给自己作证）。
- * 网关侧那一份就是它的服务端对应（见 `adapters/agri-app-auth/src/ai-prefix.ts`）。
+ * 网关侧那一份就是它的服务端对应（见服务端的 `prefix` 字段）。
  *
  * ## 怎么读
  *

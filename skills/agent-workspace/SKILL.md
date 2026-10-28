@@ -76,7 +76,7 @@ rm -f 文件名                               # 删
 ⚠️ **读剪贴板需要 App 在前台有焦点**（Android 10+ 的系统限制）。
 读不到时能力会明确报错，**不会谎报「剪贴板是空的」** —— 那是两种不同的失败。
 
-### 3) 我们内部拟 Linux 自制的命令（`agent-*`）
+### 3) SDK 自制的命令（`agent-*`）
 
 这批**不在 Termux:API 里**，别去别处找：
 
@@ -90,7 +90,7 @@ rm -f 文件名                               # 删
 | `agent-quota set 200MB` | 改配额（写 `200MB`/`1GB`/`不限`） |
 | `agent-quota reset` | 改回宿主的默认值 |
 | `agent-schedule list/add/remove/due` | 定时任务（见 `agent-scheduling` 技能） |
-| `agent-http-get` / `agent-http-post` | 调内部接口取数据（见 `agent-data-api` 技能） |
+| `agent-http-get` / `agent-http-post` | 调宿主接口取数据（见 `agent-data-api` 技能） |
 
 ## 三、你不能做的事
 

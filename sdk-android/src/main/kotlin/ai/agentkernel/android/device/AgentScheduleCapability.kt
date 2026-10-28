@@ -11,7 +11,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /**
- * `agent-schedule` —— **定时任务**（我们内部拟 Linux 自制命令）。
+ * `agent-schedule` —— **定时任务**（SDK 自制命令）。
  *
  * 子命令：
  * - `list` —— 看有哪些任务；

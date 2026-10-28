@@ -13,7 +13,11 @@ import ai.agentkernel.llm.openai.ChatCompletionsClient
 import ai.agentkernel.llm.openai.EffortCatalog
 import ai.agentkernel.llm.openai.EffortCatalogClient
 import ai.agentkernel.llm.openai.LlmAuth
+import ai.agentkernel.memory.ContextMemory
+import ai.agentkernel.memory.ContextPolicy
+import ai.agentkernel.memory.MemoryStore
 import ai.agentkernel.prompt.AgentSystemPrompt
+import ai.agentkernel.protocol.AssistantMessage
 import ai.agentkernel.protocol.ChatMessage
 import ai.agentkernel.protocol.UserMessage
 import android.app.Application
@@ -89,12 +93,12 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      * 工作区能力：隔离工作区 + 配额 + 清理。
      *
      * 超配额时 [workspaceGuard] 会把一条**可执行**的告警注入给 agent，
-     * 让它自己去 `agent-cleanup` —— 而不是我们替它删东西。
+     * 让它自己去 `agent-cleanup` —— 而不是替它删东西。
      */
     val workspace = AgentWorkspaceCapabilities(context)
 
     /**
-     * HTTP 能力：调内部数据 API。
+     * HTTP 能力：调宿主数据 API。
      *
      * 地址与 token **由宿主注入** —— agent 下发的命令里只会出现相对路径，
      * token 不进转录、不进日志、不进模型上下文。
@@ -129,13 +133,70 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      *
      * 这不是洁癖：两者一旦不一致，自检那条「提示词·命令清单与真机一致」就变成
      * **验了一份模型根本没看到的提示词** —— 自检会显示 ✅，而真机上的提示词早被服务端截断了。
-     * （真机实测踩过：自检显示 2209 字符、实际对话用的是 1809。）
+     * （真机实测：自检显示 2197 字符、实际对话用的是 1797。）
      *
-     * Demo 取 **CORE**（1809 字符）：它是「在会把 system 段截断到 2000 的服务上也装得下」的
+     * Demo 取 **CORE**（1797 字符）：它是「在会把 system 段截断到 2000 的服务上也装得下」的
      * **安全值** —— 换成哪个服务都不会被砍掉提示词尾部。
-     * 直连 DeepSeek 官方没有这个上限，那边可以用 SDK 的默认值 FULL（2209 字符）。
+     * 直连 DeepSeek 官方没有这个上限，那边可以用 SDK 的默认值 FULL（2197 字符）。
      */
     private val commandDetail = AgentSystemPrompt.CommandDetail.CORE
+
+    // ---- 上下文压缩 + 长期记忆 ----
+
+    /**
+     * 压缩与记忆的**旋钮**。命令行可注入（回归用），默认是 SDK 的推荐值。
+     *
+     * - `maxContextChars`：一次请求的字符预算，超了自动压一次；
+     * - `idleArchiveMillis`：闲置多久算「这个话题结束了」，到点归档成长期记忆。
+     */
+    var memoryPolicy by mutableStateOf(ContextPolicy())
+        private set
+
+    /** 命令行注入压缩/归档参数（回归用；null = 用默认值）。 */
+    fun applyMemoryPolicy(maxChars: Int?, idleMinutes: Int?) {
+        memoryPolicy = ContextPolicy(
+            maxContextChars = maxChars?.takeIf { it > 0 } ?: ContextPolicy().maxContextChars,
+            idleArchiveMillis = (idleMinutes?.takeIf { it > 0 } ?: 30) * 60_000L,
+        )
+    }
+
+    /**
+     * 客户端与记忆执行器 —— **跨轮复用**（配置没变就不重建）。
+     *
+     * ★ 为什么必须复用：记忆执行器身上挂着「本会话的压缩摘要」和「上次活动时刻」，
+     * 每轮新建 = 每轮都当第一次见，历史被压过的事会**再压一遍**、
+     * 闲置计时也会被清零。
+     */
+    private var cachedClient: ChatCompletionsClient? = null
+    private var cachedMemory: ContextMemory? = null
+    private var cachedKey: String? = null
+
+    /** 取（必要时重建）客户端 + 记忆执行器。 */
+    private fun clientAndMemory(): Pair<ChatCompletionsClient, ContextMemory> {
+        val key = "$gatewayUrl|$gatewayToken|$gatewayModel|${memoryPolicy.maxContextChars}|${memoryPolicy.idleArchiveMillis}"
+        val c = cachedClient
+        val m = cachedMemory
+        if (c != null && m != null && cachedKey == key) return c to m
+
+        val client = ChatCompletionsClient(
+            baseUrl = gatewayUrl,
+            transport = OkHttpTransport(),
+            // ★ 用 token 鉴权；线格式仍然是 OpenAI 那套，一个字没改。
+            //   （DeepSeek 官方就是 Bearer + 你的 key；换成自建服务换成它自己的头名。）
+            auth = LlmAuth.bearer(gatewayToken),
+        )
+        val memory = ContextMemory(
+            llm = client,
+            model = gatewayModel,
+            // 记忆落在 agent 私有根下 —— 普通文件，agent 用终端就能读。
+            store = MemoryStore(File(executor.layout.varDir, AndroidAgentSdk.MEMORY_DIR)),
+            policy = memoryPolicy,
+        )
+        cachedClient = client
+        cachedMemory = memory
+        cachedKey = key
+        return client to memory
+    }
 
     init {
         systemPrompt = AndroidAgentSdk.buildSystemPrompt(
@@ -476,7 +537,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 log("CHECK", "${verdict.emoji} 文件·${spec.title} | exit=${r.exitCode} | ${r.elapsedMs}ms | ${r.output.ifBlank { "(no output)"} }")
             }
 
-            // 4) 我们内部拟 Linux 自制的命令（agent-*）
+            // 4) SDK 自制的命令（agent-*）
             //
             //    ⚠️ 自检**不能自己造垃圾** —— 「加一条定时任务」每跑一次就在设备上多留一条。
             //    所以：记下它返回的 id，循环结束后**自己删掉**，
@@ -494,14 +555,14 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                     addedScheduleId = Regex("\"id\":\"([^\"]+)\"").find(r.output)?.groupValues?.get(1)
                 }
                 checks += CheckItem(
-                    title = "内部命令 · ${spec.title}",
+                    title = "SDK 自制命令 · ${spec.title}",
                     detail = spec.subtitle,
                     command = spec.command,
                     verdict = verdict,
                     output = r.output.ifBlank { "（无输出，退出码 ${r.exitCode}）" },
                     elapsedMs = r.elapsedMs,
                 )
-                log("CHECK", "${verdict.emoji} 内部命令·${spec.title} | exit=${r.exitCode} | ${r.output}")
+                log("CHECK", "${verdict.emoji} SDK 自制命令·${spec.title} || exit=${r.exitCode} | ${r.output}")
             }
             // 自检不留痕：把刚才加的那条定时任务删掉。
             addedScheduleId?.let { id ->
@@ -510,14 +571,14 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 // 那正是本项目最讨厌的「谎报成功」。
                 val removed = rm.output.contains("\"removed\":true")
                 checks += CheckItem(
-                    title = "内部命令 · 自检不留垃圾",
+                    title = "SDK 自制命令 · 自检不留垃圾",
                     detail = "自检加的定时任务自己删掉 —— 反复跑自检不会在设备上越堆越多",
                     command = "agent-schedule remove $id",
                     verdict = if (removed) Verdict.PASS else Verdict.FAIL,
                     output = rm.output.ifBlank { "（无输出，退出码 ${rm.exitCode}）" },
                     elapsedMs = rm.elapsedMs,
                 )
-                log("CHECK", "${if (removed) "✅" else "❌"} 内部命令·自检不留垃圾 | id=$id | ${rm.output}")
+                log("CHECK", "${if (removed) "✅" else "❌"} SDK 自制命令·自检不留垃圾 | id=$id | ${rm.output}")
             }
 
             // 5) 配额闭环：agent 自己把配额改小 → 工作区立刻变成「超限」→ 改回默认
@@ -576,7 +637,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
             val claimed = AndroidAgentSdk.systemShellInventory().allCommands()
             // 独立复核：逐个 stat。
             // ⚠️ 必须 stat 不能列目录：Android 的 /system/bin 是 drwxr-x--x，
-            //    普通 App 没有读权限，File.list() 必然返回 null（真机踩过：清单探出 0 条）。
+            //    普通 App 没有读权限，File.list() 必然返回 null（真机上出现过：清单探出 0 条）。
             //    （复核用的是同一套 stat 机制，但代码是独立写的；
             //     真正独立的证据是下面**实跑**那几条 —— 「存在」不等于「能跑」。）
             val reallyThere = setOf("/system/bin", "/system/xbin")
@@ -642,7 +703,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
             //    其余原样丢给 /system/bin/sh。
             //
             //    判据：**退出码不是 127**（127 = command not found = 路由/白名单拒了）。
-            //    权限不够会是 1 或别的码 + 明确报错 —— 那是 Android 说的，不是我们说的。
+            //    权限不够会是 1 或别的码 + 明确报错 —— 那是 Android 说的，不是 SDK 说的。
             val outsideProbes = listOf(
                 // toybox 不在提示词白名单里（白名单只有 sh，没有 toybox），但设备上一定有
                 "toybox" to "toybox",
@@ -717,13 +778,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
         }
         chatBusy = true
         try {
-            val client = ChatCompletionsClient(
-                baseUrl = gatewayUrl,
-                transport = OkHttpTransport(),
-                // ★ 用 token 鉴权；线格式仍然是 OpenAI 那套，一个字没改。
-                //   （DeepSeek 官方就是 Bearer + 你的 key；换成自建服务换成它自己的头名。）
-                auth = LlmAuth.bearer(gatewayToken),
-            )
+            val (client, memory) = clientAndMemory()
             val sdk = AndroidAgentSdk(
                 llm = client,
                 model = gatewayModel,
@@ -731,7 +786,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 // ★ 系统提示词由 SDK 生成（环境 / 命令清单 / 能力边界 / 工作区规则），
                 //   这里不用手写 —— 手写的版本会跟实际注册的能力对不上。
                 // ★ 命令清单用 CORE：有些服务会把客户端 system 段硬截断到 2000 字符，
-                //   完整清单(2209)装不下、尾部会被砍掉；直连 DeepSeek 官方没有这个限制，
+                //   完整清单(2197)装不下、尾部会被砍掉；直连 DeepSeek 官方没有这个限制，
                 //   那边的默认值就是 FULL。
                 // ★ 用 DemoState.commandDetail —— 和自检那份**同一个值**（否则自检在验另一份）。
                 commandDetail = commandDetail,
@@ -743,6 +798,8 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 workspaceGuard = workspace.guard,
                 // ★ 体检器跨轮复用（检测轮与轮之间的前缀漂移）。
                 inspector = contextInspector,
+                // ★ 记忆执行器跨轮复用（压缩摘要 + 闲置计时都挂在它身上）。
+                memory = memory,
                 // ★ 会话标识：让服务端也能独立复核前缀（头部是服务端拼的，本地看不见）。
                 sessionId = sessionId,
                 onEvent = { event ->
@@ -940,6 +997,99 @@ class DemoState(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * 记忆子系统的命令行自检（自动化用）。
+     *
+     * 验四件事：
+     * 1. **归档**：把一段历史总结成记忆 → 真的产出了一条条目；
+     * 2. **落盘**：记忆正文在磁盘上（agent 用终端 `cat` 就能读）；
+     * 3. **摘要块**：进提示词的那一块**带的是正文**，不是只有标题；
+     * 4. **压缩**：超预算的历史被压了一次 → 摘要产出、历史变短。
+     *
+     * ⚠️ 归档与压缩都**要真的调一次模型 API**，所以必须配好模型：
+     * ```
+     * adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity \
+     *     --ez autorun_memory true \
+     *     --es gateway_url "https://api.deepseek.com/v1" \
+     *     --es gateway_token "<key>"
+     * adb logcat -d -s AgentSdkDemo
+     * ```
+     */
+    fun startMemoryCheck() {
+        DemoRuntime.startOncePerProcess("memorycheck") { runMemoryCheck() }
+    }
+
+    suspend fun runMemoryCheck() {
+        if (gatewayUrl.isBlank() || gatewayToken.isBlank()) {
+            log("MEM", "❌ 没配模型地址/token，验不了（归档与压缩都要真的调一次模型）")
+            return
+        }
+        val (client, memory) = clientAndMemory()
+        val store = memory.memoryStore()
+
+        fun item(title: String, ok: Boolean, detail: String, elapsed: Long) {
+            val verdict = if (ok) Verdict.PASS else Verdict.FAIL
+            log("MEM", "${verdict.emoji} $title | $detail | ${elapsed}ms")
+            checks += CheckItem(title, detail, "(记忆子系统)", verdict, detail, elapsed)
+        }
+
+        // ① 归档：把一段历史总结成一条记忆
+        val t0 = System.currentTimeMillis()
+        val fake = listOf(
+            UserMessage("我在配一个手机端的 agent SDK"),
+            AssistantMessage("先把命令执行跑通，再接模型"),
+            UserMessage("好，就这么办"),
+        )
+        val entry = memory.archiveNow(fake)
+        val t1 = System.currentTimeMillis()
+        item("归档产出记忆条目", entry != null, entry?.let { "id=${it.id} 标题=${it.title}" } ?: "没产出条目", t1 - t0)
+
+        // ② 落盘：正文在磁盘上（agent 用终端就能读）
+        val body = entry?.let { store.readBody(it.id) }
+        item("记忆正文落盘", body != null && body.isNotBlank(), body?.let { "正文 ${it.length} 字符" } ?: "读不到正文", 0)
+
+        // ③ 摘要块：带的是正文，不是只有标题
+        val digest = memory.digest()
+        val digestOk = digest != null && entry != null && digest.contains(entry.title)
+        item("记忆进摘要块", digestOk, digest?.let { "摘要块 ${it.length} 字符" } ?: "没有摘要块", 0)
+
+        // ④ 压缩：用一份「预算很小」的策略，超预算就该被压一次
+        val t2 = System.currentTimeMillis()
+        val probe = ContextMemory(
+            llm = client,
+            model = gatewayModel,
+            store = store,
+            policy = ContextPolicy(
+                maxContextChars = 500,
+                keepRecentChars = 100,
+                summaryTargetChars = 300,
+                idleArchiveMillis = 0,
+            ),
+        )
+        val big = (1..20).map { UserMessage("第$it 条消息 " + "x".repeat(60)) }
+        val plan = probe.prepare(big, prefixChars = 0)
+        val t3 = System.currentTimeMillis()
+        item("超容量自动压缩", plan.compacted && plan.summary != null,
+            "压缩=${plan.compacted} 摘要长度=${plan.summary?.length ?: 0} 历史 ${big.size}→${plan.history.size} 条", t3 - t2)
+
+        // ⑤ 压缩后历史确实变短了（不是压了个寂寞）
+        item("压缩后历史变短", plan.history.size < big.size,
+            "${big.size} → ${plan.history.size} 条", 0)
+
+        // ⑥ 记忆能跨执行器保留（换个实例还在 —— 那是「落盘」的意义）
+        val fresh = ContextMemory(
+            llm = client,
+            model = gatewayModel,
+            store = MemoryStore(File(executor.layout.varDir, AndroidAgentSdk.MEMORY_DIR)),
+            policy = memoryPolicy,
+        )
+        val digest2 = fresh.digest()
+        item("记忆跨实例保留", digest2 != null && entry != null && digest2.contains(entry.title),
+            digest2?.let { "新实例摘要块 ${it.length} 字符" } ?: "新实例没有摘要块", 0)
+
+        log("MEM", "记忆目录=${File(executor.layout.varDir, AndroidAgentSdk.MEMORY_DIR).absolutePath} 条目数=${store.list().size}")
+    }
+
+    /**
      * 命令行触发的**多轮**对话（自动化用）。
      *
      * ## 为什么必须有多轮
@@ -954,7 +1104,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      * ```
      * adb shell am start -n com.agentkernel.demo/.MainActivity \
      *     --es autorun_chat_multi "问题一|问题二|问题三" \
-     *     --es gateway_url "http://127.0.0.1:43080/api-app/ai" \
+     *     --es gateway_url "https://api.deepseek.com/v1" \
      *     --es gateway_token "<token>"
      * ```
      */
@@ -1066,7 +1216,7 @@ private fun log(tag: String, message: String) {
  * | `viewModelScope`（ViewModel） | **能活下来**（配置变化时 ViewModel 保留） | **被取消**（ViewModel 被 clear） |
  * | **进程级 scope（本对象）** | **能活下来** | **能活下来** |
  *
- * 真机实测踩到过：agent 循环跑在 composition scope 上时，
+ * 真机实测发现：agent 循环跑在 composition scope 上时，
  * activity 一被重建（`am start --activity-clear-task` 走的是 **finish** 不是配置变化），
  * 循环就**中途夭折** —— 而且是**静默失败**：只抛一句
  * `The coroutine scope left the composition`（或 `Job was cancelled`），
@@ -1115,7 +1265,7 @@ internal object DemoRuntime {
      * 但 activity 被重建时，系统会用**同一个 intent** 重建它 →
      * 同一条 autorun 会被**再触发一次**（上一轮已经跑完了，守卫已经放行）。
      *
-     * 真机实测踩到过：8 轮多轮对话跑完后，activity 重建又跑了一遍 8 轮 ——
+     * 真机实测发现：8 轮多轮对话跑完后，activity 重建又跑了一遍 8 轮 ——
      * 结果是**两段对话串在同一条历史里**（第二轮带着第一轮的 16 条消息继续），
      * 而且把请求量直接顶到限频（429）。
      *

@@ -8,7 +8,7 @@ description: 在安卓设备上用「类 Linux 命令」完成三类事——跑
 agent 只需输出命令，命令在设备上的「拟 Linux」沙箱里执行，结果回传。
 命令分两层：**基础层**（现成的标准 Linux 命令）和 **硬件层**（`termux-*` 风格，由宿主 App 桥接到安卓 API）。
 
-> 环境细节（你在哪儿、工作目录、垃圾怎么清、定时怎么设、调内部接口怎么调）
+> 环境细节（你在哪儿、工作目录、垃圾怎么清、定时怎么设、调宿主接口怎么调）
 > 见 [agent-workspace](../agent-workspace/SKILL.md)。
 
 ## 一、基础层：标准 Linux 命令（现成，无需自己造）
@@ -79,7 +79,7 @@ find . -name "*.jpg" | head -20
 > 想扩展就实现 `DeviceCapability` 接口并注册进 `DeviceCapabilityRegistry`；
 > 命令名**必须**与 Termux:API 逐字一致，模型才认。
 
-### 我们内部拟 Linux 自制的命令（`agent-*`）
+### SDK 自制的命令（`agent-*`）
 
 这批不在 Termux:API 里，是这套环境特有的：
 `agent-workspace` / `agent-cleanup` / `agent-quota` / `agent-schedule` / `agent-http-*`。
@@ -101,6 +101,6 @@ find . -name "*.jpg" | head -20
 
 - **跑脚本 ≠ 跑二进制**：跑 shell 脚本可以；跑 ELF 二进制不行（noexec，退出码 126）。
 - **读剪贴板要 App 在前台有焦点**（Android 10+ 限制）；读不到时能力会明确报错，不谎报空。
-- **明文 HTTP 被系统禁**：内部接口是 http:// 时，宿主要配 `networkSecurityConfig`。
+- **明文 HTTP 被系统禁**：宿主接口是 http:// 时，宿主要配 `networkSecurityConfig`。
 - **手电筒是开关**：开了要记得关，别把用户的手机留在亮着灯的状态。
 - 手机公共存储访问需要 `termux-setup-storage`（本 SDK 未实现该能力，别写）。

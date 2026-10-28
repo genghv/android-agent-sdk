@@ -12,7 +12,7 @@ import ai.agentkernel.prefix.PrefixLayout
  * - 宿主把这段文本作为 system 消息插进下一轮 → agent 看到 → 自己去跑
  *   `agent-cleanup` / 调 `agent-quota`。
  *
- * 也就是说：**清理动作是 agent 做的，我们只负责告诉它「该清了」并给出怎么清的命令。**
+ * 也就是说：**清理动作是 agent 做的，宿主只负责告诉它「该清了」并给出怎么清的命令。**
  */
 class WorkspaceGuard(
     val layout: PrefixLayout,

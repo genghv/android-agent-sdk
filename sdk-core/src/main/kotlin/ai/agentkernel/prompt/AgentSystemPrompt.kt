@@ -24,7 +24,7 @@ import ai.agentkernel.workspace.formatBytes
  *
  * ## 边界要写死
  *
- * 装应用 / 点屏幕 / 改系统设置这些特权能力我们**故意不做**。
+ * 装应用 / 点屏幕 / 改系统设置这些特权能力**故意不做**。
  * 不写进提示词，模型会一次次去试 `pm install`、`input tap`，每次都失败、
  * 每次都在工作区里留下垃圾。写清楚「没有这个能力」，比让它撞墙便宜得多。
  */
@@ -135,7 +135,7 @@ object AgentSystemPrompt {
                 appendLine()
             }
             if (internal.isNotEmpty()) {
-                appendLine("### 3) 我们内部拟 Linux **自制**的命令（不在 Termux:API 里，别去别处找）")
+                appendLine("### 3) SDK 自制的命令（不在 Termux:API 里，别去别处找）")
                 internal.forEach { appendLine("- $it") }
                 appendLine()
             }

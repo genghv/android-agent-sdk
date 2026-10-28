@@ -28,7 +28,7 @@ import kotlin.test.assertTrue
  * - 能力清单 = 那 12 个命令的 usage 字符串（6 个 termux-* + 6 个 agent-*）；
  * - 配额策略 = 宿主默认（设备剩余空间的 5%）。
  *
- * 交叉校验：这套输入在**旧环境段**下算出 **2057 字符**，与真机当时量到的 2057 一致 ⇒
+ * 交叉校验：这套输入在**旧环境段**下算出 **2045 字符**，与锚点一致 ⇒
  * 复刻是忠实的，于是这里算出的数字可以直接当真机值用。
  *
  * 真机上的权威数字仍然看 Demo 自检打进 logcat 的那行（`| prompt=… chars`）。
@@ -109,9 +109,9 @@ class DevicePromptBudgetTest {
     }
 
     @Test
-    fun `复刻是忠实的：旧环境段下算出来应当等于真机当时量到的 2057`() {
-        // 真机（改环境段之前）量到：核心模式 = 2057 字符。
-        // 用同一套复刻输入，把环境段换回旧写法，算出来必须还是 2057 ——
+    fun `复刻是忠实的：旧环境段下算出来应当等于锚点`() {
+        // 锚点见 [OLD_ENV_ANCHOR]：它锁的是整段提示词，改文案就要重量一次。
+        // 用同一套复刻输入，把环境段换回旧写法，算出来必须还是锚点 ——
         // 对得上，说明这套输入（路径 / 命令清单 / 能力清单 / 策略）复刻忠实。
         val root = "/data/user/0/com.agentkernel.demo/files/agent"
         val oldEnv = buildString {
@@ -142,10 +142,25 @@ class DevicePromptBudgetTest {
             AgentSystemPrompt.CommandDetail.CORE,
         )
         val asIfOldEnv = core.replace(newEnv, oldEnv)
-        println("[device-prompt] 旧环境段复刻 = ${asIfOldEnv.length}（真机当时量到 2057）")
+        println("[device-prompt] 旧环境段复刻 = ${asIfOldEnv.length}（锚点 $OLD_ENV_ANCHOR）")
         assertTrue(
-            asIfOldEnv.length == 2057,
-            "复刻与真机对不上：旧环境段下算出 ${asIfOldEnv.length}，真机当时是 2057",
+            asIfOldEnv.length == OLD_ENV_ANCHOR,
+            "复刻与锚点对不上：旧环境段下算出 ${asIfOldEnv.length}，锚点是 $OLD_ENV_ANCHOR",
         )
+    }
+
+    companion object {
+        /**
+         * 把**旧环境段**换回当前提示词后，算出来的字符数（锚点）。
+         *
+         * 对得上，说明这套复刻输入（路径 / 命令清单 / 能力清单 / 策略）忠实。
+         *
+         * ⚠️ 这个锚点锁的是**整段提示词**，不只是环境段：
+         * 提示词正文改一个字（某段标题改短、换个说法），它就得重新量一次 ——
+         * 否则文案一变这条断言就误报，而它本来要抓的是「复刻输入不忠实」。
+         *
+         * 历史：真机首次量到 2057；提示词正文改写后为 2045。
+         */
+        private const val OLD_ENV_ANCHOR = 2045
     }
 }

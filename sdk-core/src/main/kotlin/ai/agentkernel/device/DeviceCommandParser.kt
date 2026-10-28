@@ -27,12 +27,12 @@ data class DeviceCommand(
  *
  * 认不出的 `termux-xxx` / `agent-xxx`（注册表里没有这个名字）**不当能力处理**，
  * 照常当普通命令走 shell —— 这样「拼错名字」会得到命令找不到，
- * 而不是被我们编一个假错误。
+ * 而不是被编一个假错误。
  *
  * ## 支持多前缀
  *
  * - `termux-`：与 **Termux:API 逐字对齐**的标准命令（模型按 Termux 的习惯写就认）；
- * - `agent-`：**我们内部拟 Linux 自制**的命令（工作区维护、HTTP 调用等）。
+ * - `agent-`：**SDK 自制**的命令（工作区维护、HTTP 调用等）。
  *
  * 前缀 + 能力名是**一对**去注册表里查的，所以 `termux-agent-foo` 和 `agent-foo`
  * 这种撞名情况不会认错。
@@ -55,7 +55,7 @@ internal object DeviceCommandParser {
     /** 与 Termux:API 对齐的命令前缀。 */
     const val TERMUX_PREFIX = "termux-"
 
-    /** 我们内部拟 Linux 自制命令的前缀。 */
+    /** SDK 自制命令的前缀。 */
     const val AGENT_PREFIX = "agent-"
 
     /**

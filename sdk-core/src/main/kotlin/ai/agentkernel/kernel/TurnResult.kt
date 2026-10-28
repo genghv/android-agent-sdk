@@ -28,6 +28,9 @@ enum class TurnStop {
  * @param prefix **服务端视角**的前缀体检报告（网关回的 `prefix`）。
  *   与 [context] 互补：[context] 查本地这段历史，[prefix] 查服务端拼的头部
  *   （平台提示词/技能/工具定义）—— 那一段 App 本地看不见。
+ * @param added 本轮**新增**的消息（assistant + 工具回填）。
+ *   单独拎出来，是因为 [messages] 里的历史**可能已经被压缩过** ——
+ *   这时不能再用「历史条数」去切「本轮新增」（条数对不上）。
  */
 data class TurnResult(
     val messages: List<ChatMessage>,
@@ -36,10 +39,16 @@ data class TurnResult(
     val usage: Usage? = null,
     val context: ContextReport? = null,
     val prefix: PrefixReport? = null,
+    val added: List<ChatMessage> = emptyList(),
 ) {
-    /** 本轮新增的消息（去掉传入 history 的部分）。 */
+    /**
+     * 本轮新增的消息（去掉传入 history 的部分）。
+     *
+     * 压缩场景下 [messages] 的历史部分已经不是传进来的那份了，
+     * 所以这里优先用 [added]（内核直接给的），拿不到才退回按条数切。
+     */
     fun appended(history: List<ChatMessage>): List<ChatMessage> =
-        messages.drop(history.size)
+        if (added.isNotEmpty()) added else messages.drop(history.size)
 }
 
 /** 内核事件，供宿主做日志 / 流式 UI。 */

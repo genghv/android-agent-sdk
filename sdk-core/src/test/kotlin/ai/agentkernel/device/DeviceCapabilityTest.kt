@@ -222,9 +222,9 @@ class DeviceCapabilityTest {
         assertEquals(listOf("a > b"), found[0].args, "引号里的 > 是内容，不是重定向")
     }
 
-    // ---- 我们内部拟 Linux 自制的命令（`agent-` 前缀） ----
+    // ---- SDK 自制的命令（`agent-` 前缀） ----
     //
-    // 这批命令**不在 Termux:API 里**，是我们这套环境特有的（工作区维护、HTTP 调用…）。
+    // 这批命令**不在 Termux:API 里**，是这套环境特有的（工作区维护、HTTP 调用…）。
     // 所以必须与 Termux 对齐的那批区分开：模型要把它们当成「内部命令」，
     // 而不是以为去别处也能找到。
 
@@ -272,7 +272,7 @@ class DeviceCapabilityTest {
 
     // ---- 名字必须与 Termux:API 逐字对齐 ----
     // 下面这几条是回归护栏：模型是按 Termux:API 的习惯写命令的，
-    // 我们把剪贴板合并成一个 `clipboard` 能力的话，模型写
+    // 把剪贴板合并成一个 `clipboard` 能力的话，模型写
     // `termux-clipboard-set` 会直接落空（找不到二进制 → command not found）。
 
     @Test

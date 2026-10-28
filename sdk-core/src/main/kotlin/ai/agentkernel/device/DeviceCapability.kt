@@ -40,7 +40,7 @@ interface DeviceCapability {
      * 这条能力属于哪一组。
      *
      * - [CapabilityOrigin.TERMUX] —— 与 Termux:API 逐字对齐的标准命令；
-     * - [CapabilityOrigin.INTERNAL] —— **我们内部拟 Linux 自制**的命令。
+     * - [CapabilityOrigin.INTERNAL] —— **SDK 自制**的命令。
      *
      * 分组不是为了好看：提示词里要**分别告诉模型这两类命令的来历**，
      * 否则模型会把 `agent-cleanup` 当成 Termux 命令去别处找。
@@ -71,7 +71,7 @@ enum class CapabilityOrigin {
     /** 与 Termux:API 逐字对齐 —— 模型按 Termux 的习惯写就认。 */
     TERMUX,
 
-    /** 我们内部拟 Linux 自制 —— 不在 Termux:API 里，是我们这套环境特有的。 */
+    /** SDK 自制 —— 不在 Termux:API 里，是本 SDK 环境特有的。 */
     INTERNAL,
 }
 

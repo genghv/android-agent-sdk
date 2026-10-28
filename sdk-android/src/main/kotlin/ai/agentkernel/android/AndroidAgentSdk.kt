@@ -9,6 +9,9 @@ import ai.agentkernel.kernel.KernelEvent
 import ai.agentkernel.kernel.TurnResult
 import ai.agentkernel.llm.LlmClient
 import ai.agentkernel.llm.openai.ChatCompletionsClient
+import ai.agentkernel.memory.ContextMemory
+import ai.agentkernel.memory.ContextPolicy
+import ai.agentkernel.memory.MemoryStore
 import ai.agentkernel.prefix.PrefixLayout
 import ai.agentkernel.prompt.AgentSystemPrompt
 import ai.agentkernel.prompt.ShellCommandInventory
@@ -56,7 +59,7 @@ import java.io.File
  * 注意：history（含历史 / 压缩结果）仍由**调用方**拼好传入，这不是内核职责。
  */
 class AndroidAgentSdk(
-    llm: LlmClient,
+    private val llm: LlmClient,
     model: String,
     private val executor: CommandExecutor,
     private val shizuku: ShizukuBridge = NoopShizukuBridge(),
@@ -75,7 +78,7 @@ class AndroidAgentSdk(
      *
      * 传了之后，**每一轮开始前**都会检查工作区占用；
      * 接近或超过配额时，把一条可执行的告警作为 system 消息插进这一轮 ——
-     * 让 agent 自己看到、自己去清理（而不是我们去替它删东西）。
+     * 让 agent 自己看到、自己去清理（而不是去替它删东西）。
      */
     private val workspaceGuard: WorkspaceGuard? = null,
     /** 宿主补充说明（内部接口约定、网关地址等），会拼进默认系统提示词。 */
@@ -148,14 +151,47 @@ class AndroidAgentSdk(
      *
      * 服务端靠它记住「这个会话上一次请求长什么样」，从而**独立**复核
      * 「这一轮是不是上一轮的追加扩展」—— 也就是上游前缀缓存还剩多少。
-     * 换句话说：[inspector] 查的是「**我们**有没有改坏前缀」，
+     * 换句话说：[inspector] 查的是「**调用方**有没有改坏前缀」，
      * 这个 id 让服务端能查「**服务端**有没有改坏前缀」（平台提示词、技能、工具定义）。
      *
      * 一个会话一个 id，**换会话要换 id**（否则两段对话会被当成一段，报告失真）。
      */
     private val sessionId: String? = null,
+    /**
+     * 自带的 [ContextMemory]（上下文压缩 + 长期记忆）。null = 用 [memoryPolicy] 自动建一个。
+     */
+    memory: ContextMemory? = null,
+    /**
+     * 上下文压缩与长期记忆的**开关 + 旋钮**。
+     *
+     * 传一个 [ContextPolicy] 就启用；null = 不启用（历史只增不减）。
+     *
+     * - 启用后：**请求超过容量**会自动调一次模型把旧历史压成摘要，
+     *   摘要进**稳定前缀**；**闲置超过阈值**会把这一段会话归档成长期记忆（落盘）。
+     * - 记忆落在 `<filesDir>/agent/var/memory/` —— 普通文件，
+     *   agent 用已有的终端能力 `cat` 就能读，**不需要新工具**。
+     * - 全部旋钮见 [ContextPolicy]（容量、保留长度、闲置时长、记忆预算……）。
+     */
+    memoryPolicy: ContextPolicy? = null,
 ) {
     private val tools = ToolRegistry(listOf(ShellTool(executor, capabilities = capabilities)))
+
+    /**
+     * 上下文压缩 + 长期记忆的执行者（null = 没启用）。
+     *
+     * ★ **要跨轮复用同一个实例** —— 它持有「本会话的压缩摘要」和「上次活动时刻」，
+     * 换实例等于把压缩状态和闲置计时都清零。
+     */
+    private val memory: ContextMemory? = memory ?: memoryPolicy?.let { policy ->
+        val layout = (executor as? AndroidCommandExecutor)?.layout
+        if (layout == null) null
+        else ContextMemory(
+            llm = llm,
+            model = model,
+            store = MemoryStore(File(layout.varDir, MEMORY_DIR)),
+            policy = policy,
+        )
+    }
 
     /**
      * 这台设备上**真实存在**的系统命令清单（只探测一次）。
@@ -218,11 +254,39 @@ class AndroidAgentSdk(
      * 每轮多一份 1800 字符的提示词，前缀从此对不齐，缓存永远命中不了。
      */
     suspend fun runTurn(messages: List<ChatMessage>): TurnResult {
-        val prefix = ArrayList<ChatMessage>(2)
-        resolveSystemPrompt()?.let { prefix += SystemMessage(it) }
+        // ★ 稳定前缀的**顺序是固定的**：提示词 → 长期记忆 → 会话摘要 → 工作区告警。
+        //   顺序一变 = 前缀变了 = 缓存全废。
+        val prompt = resolveSystemPrompt()
+        val digest = memory?.digest()
+        // 已经知道的前缀长度（用来判断这次要不要压）。
+        val knownChars = (prompt?.length ?: 0) + (digest?.length ?: 0) +
+            (memory?.sessionSummary()?.length ?: 0)
+
+        // 超容量就在这里**压一次**；闲置到点就在这里**归档成记忆**（然后开新会话）。
+        val plan = memory?.prepare(messages, prefixChars = knownChars)
+
+        val prefix = ArrayList<ChatMessage>(5)
+        prompt?.let { prefix += SystemMessage(it) }
+        digest?.let { prefix += SystemMessage(it) }
+        plan?.summary?.let { prefix += SystemMessage(SUMMARY_HEADER + it) }
         workspaceGuard?.alert()?.let { prefix += SystemMessage(it) }
-        return kernel.runTurn(messages, prefix = prefix)
+
+        // plan.history 可能已经压缩过 / 归档过。
+        // 宿主把 result.messages 存回去，存的就是**压缩后**的那份 —— 历史不会越滚越大。
+        val history = plan?.history ?: messages
+        return kernel.runTurn(history, prefix = prefix)
     }
+
+    /**
+     * 上下文压缩 + 长期记忆的执行者；null = 没启用。
+     *
+     * 宿主可以拿它做**手动**归档（比如用户按了「这个话题结束了」）：
+     * ```
+     * sdk.memory()?.archiveNow(history)
+     * ```
+     * 也能拿它的 [ContextMemory.memoryStore] 去翻归档里的旧记忆。
+     */
+    fun memory(): ContextMemory? = memory
 
     /**
      * 客户端 system 段的**长度体检**。
@@ -255,6 +319,12 @@ class AndroidAgentSdk(
     }
 
     companion object {
+        /** 记忆在 agent 私有根下的目录名（`<filesDir>/agent/var/memory/`）。 */
+        const val MEMORY_DIR = "memory"
+
+        /** 会话摘要进前缀时的标题。 */
+        private const val SUMMARY_HEADER = "## 之前的对话摘要（压缩后的历史）\n"
+
         private val SYSTEM_SHELL_INVENTORY: ShellCommandInventory.Result by lazy {
             ShellCommandInventory.available(listOf(File("/system/bin"), File("/system/xbin")))
         }
@@ -319,6 +389,18 @@ class AndroidAgentSdk(
             temperature: Double? = null,
             maxTurns: Int = 32,
             commandDetail: AgentSystemPrompt.CommandDetail = AgentSystemPrompt.CommandDetail.FULL,
+            /**
+             * 上下文压缩 + 长期记忆的旋钮。传了就启用；null = 不启用。
+             *
+             * ```
+             * val sdk = AndroidAgentSdk.deepSeek(
+             *     context = context,
+             *     apiKey = key,
+             *     memoryPolicy = ContextPolicy(maxContextChars = 24_000),
+             * )
+             * ```
+             */
+            memoryPolicy: ContextPolicy? = null,
             onEvent: (KernelEvent) -> Unit = {},
         ): AndroidAgentSdk {
             val executor = if (capabilities == null) {
@@ -335,6 +417,7 @@ class AndroidAgentSdk(
                 maxTokens = maxTokens,
                 temperature = temperature,
                 commandDetail = commandDetail,
+                memoryPolicy = memoryPolicy,
             )
         }
     }

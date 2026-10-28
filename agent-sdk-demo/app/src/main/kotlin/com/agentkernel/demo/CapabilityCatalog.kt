@@ -84,9 +84,9 @@ object CapabilityCatalog {
     )
 
     /**
-     * 我们**内部拟 Linux 自制**的命令（`agent-` 前缀）。
+     * **SDK 自制**的命令（`agent-` 前缀）。
      *
-     * 这批不在 Termux:API 里 —— 是这套环境特有的（工作区维护、内部接口调用）。
+     * 这批不在 Termux:API 里 —— 是这套环境特有的（工作区维护、宿主接口调用）。
      * Demo 用的就是 SDK 注册表里的同一份，不是另写一套假的。
      */
     val internalCommands: List<CapabilitySpec> = listOf(
@@ -121,7 +121,7 @@ object CapabilityCatalog {
         CapabilitySpec(
             "http-get",
             "HTTP 取数据",
-            "调内部接口取数据（token 由宿主注入，命令里不出现）",
+            "调宿主接口取数据（token 由宿主注入，命令里不出现）",
             "agent-http-get http://www.baidu.com",
             Icons.Filled.ContentCopy,
         ),
@@ -250,7 +250,7 @@ object CapabilityCatalog {
             "echo 'echo script-ran-ok' > run.sh && sh run.sh",
             Icons.Filled.BatteryFull,
         ),
-        // 能力命令的**输出重定向** —— 单独一组，因为它踩过一个很隐蔽的坑：
+        // 能力命令的**输出重定向** —— 单独一组，因为这里有一个很隐蔽的陷阱：
         // 分词器早先不认 `>`，于是 `> battery.txt` 被当成能力的参数吞掉了，
         // 能力照跑、回 ok:true，但**文件根本没生成**（静默失败 = 谎报成功）。
         CapabilitySpec(

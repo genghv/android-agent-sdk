@@ -18,7 +18,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /**
- * 工作区相关的能力 —— **我们内部拟 Linux 自制的命令**（前缀 `agent-`）。
+ * 工作区相关的能力 —— **SDK 自制的命令**（前缀 `agent-`）。
  *
  * 这一组是「垃圾自己做处理、无用的删除、有用的留住」那条需求的落点：
  * agent 收到告警后，靠这三个命令自己完成清理与配额调整。
@@ -33,7 +33,7 @@ import kotlinx.serialization.json.put
  * | `agent-quota set 200MB` | 改配额（**不写死**，agent 自己能调） |
  * | `agent-quota reset` | 改回宿主注入的默认值 |
  *
- * 注意这些命令**不在 Termux:API 里** —— 它们是我们这套环境特有的，
+ * 注意这些命令**不在 Termux:API 里** —— 它们是这套环境特有的，
  * 所以提示词里要分开介绍（见 [ai.agentkernel.prompt.AgentSystemPrompt]）。
  */
 class AgentWorkspaceCapabilities(

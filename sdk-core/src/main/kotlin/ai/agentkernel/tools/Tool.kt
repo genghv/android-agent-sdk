@@ -48,7 +48,7 @@ class ToolRegistry(tools: List<Tool> = emptyList()) {
      *
      * ## 为什么必须排序（这是前缀缓存的硬要求）
      *
-     * dsh 对每个包都写了同一条规定（见 `packages/core/tools/README.md:122`）：
+     * 一条通用硬要求：
      * 工具 schema 必须**字节级稳定**。上游的前缀缓存认的是「逐字相同的前缀」，
      * 而 `tools` 字段就排在提示词后面 —— 工具列表的**顺序**一变，
      * 那一段字节就变了，**上游前缀缓存当场清零**。

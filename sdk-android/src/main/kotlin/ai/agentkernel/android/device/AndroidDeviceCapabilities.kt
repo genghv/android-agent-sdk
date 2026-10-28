@@ -33,18 +33,18 @@ import kotlinx.serialization.json.put
  * 能力名 = Termux:API 的命令名去掉 `termux-` 前缀，**一字不差**：
  * `torch` / `vibrate` / `notification` / `clipboard-get` / `clipboard-set` / `battery-status`。
  *
- * 为什么要对齐：模型是按 Termux:API 的习惯写命令的。若我们把剪贴板合并成一个
+ * 为什么要对齐：模型是按 Termux:API 的习惯写命令的。若把剪贴板合并成一个
  * `clipboard` 能力，模型写 `termux-clipboard-set` 时会落空 —— 它按 shell 去找这个
- * 二进制，找不到，得到「command not found」，而不是我们精心准备的 JSON。
+ * 二进制，找不到，得到「command not found」，而不是精心准备的 JSON。
  * 名字对齐 = 模型不用学新方言。
  *
  * ## 输出格式的**唯一**分歧
  *
  * Termux:API 的 `termux-clipboard-get` 直接打印纯文本，不是 JSON。
  * 这里**统一输出 JSON**（`{"ok":true,"text":"..."}`），因为：
- * - 我们的工具契约是「命令 → JSON → 回填给模型」，纯文本会被模型当成普通输出混过去；
+ * - 工具契约是「命令 → JSON → 回填给模型」，纯文本会被模型当成普通输出混过去；
  * - JSON 能区分「剪贴板是空的」和「取剪贴板失败」这两种完全不同的情况。
- * 名字对齐、格式不刻意模仿 —— 名字是**接口**，格式是**我们的契约**。
+ * 名字对齐、格式不刻意模仿 —— 名字是**接口**，格式是**SDK 的契约**。
  *
  * 失败一律 [CapabilityFailure] 抛异常，由注册表统一转 `{"ok":false,...}` + 非零退出码。
  */
@@ -286,7 +286,7 @@ fun defaultDeviceCapabilities(
     add(ClipboardGetCapability(context))
     add(ClipboardSetCapability(context))
     add(BatteryCapability(context))
-    // —— 我们内部拟 Linux 自制的那批（`agent-` 前缀）——
+    // —— SDK 自制的那批（`agent-` 前缀）——
     workspace?.let { addAll(it.capabilities) }
     http?.let { addAll(it.capabilities) }
 }

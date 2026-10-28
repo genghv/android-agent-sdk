@@ -15,7 +15,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
 /**
- * HTTP 调用能力 —— **我们内部拟 Linux 自制的命令**（前缀 `agent-`）。
+ * HTTP 调用能力 —— **SDK 自制的命令**（前缀 `agent-`）。
  *
  * ## 为什么要它，而不是让 agent 用 `curl`
  *
@@ -39,7 +39,7 @@ import java.util.concurrent.TimeUnit
  */
 class AgentHttpCapabilities(
     /**
-     * 内部 API 的基地址（如 `https://internal.corp/api`）。
+     * 宿主 API 的基地址（如 `https://host.example/api`）。
      * 留空则只能传完整 URL。
      */
     private val baseUrlProvider: () -> String = { "" },

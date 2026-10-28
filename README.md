@@ -62,7 +62,7 @@ println(result.finalText)
 android-agent-sdk/          ← 仓库根（README / LICENSE / NOTICE 都在这一层）
 ├── sdk-core/               内核（纯 JVM，不依赖 android.*）
 ├── sdk-android/            宿主层（Android library）
-├── skills/                 agent 技能文档（命令速查 / 工作区 / 数据接口 / 定时）
+├── skills/                 agent 技能文档（命令速查 / 工作区 / 记忆 / 数据接口 / 定时）
 ├── agent-sdk-demo/         宿主示例 App（Kotlin + Compose），可独立构建
 ├── bootstrap/README.md     可选的 Termux 运行时说明（载荷是 Release 附件，不进 git）
 ├── 接入指南.md              宿主 App 怎么把这个 SDK 装进去用
@@ -181,7 +181,7 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 
 ### 线格式契约：以官方线格式为基准
 
-`WireFormatTest` 的基准不是我们自己想的形状，而是 DeepSeek 官方线格式那份
+`WireFormatTest` 的基准不是想象的形状，而是 DeepSeek 官方线格式那份
 **标注了 "cross-checked against live streams"** 的实现
 （harness 仓库 `packages/llm/llm-deepseek/src/types.ts` 与同目录 `serialize.ts`）。
 
@@ -234,9 +234,9 @@ gradle :sdk-android:realLlmCheck
 | `termux-clipboard-set <文本>` | 写剪贴板 | 无 |
 | `termux-battery-status` | 电池状态 | 无 |
 
-**名字必须一字不差**：模型是按 Termux:API 的习惯写命令的。我们要是把剪贴板合并成一个
+**名字必须一字不差**：模型是按 Termux:API 的习惯写命令的。把剪贴板合并成一个
 `clipboard` 能力，模型写 `termux-clipboard-set` 就会落空 —— 它按 shell 去找这个二进制，
-找不到，得到 `command not found`，而不是我们准备好的 JSON。
+找不到，得到 `command not found`，而不是宿主准备好的 JSON。
 名字对齐 = 模型不用学新方言。（`DeviceCapabilityTest` 里有一条回归护栏盯着这件事。）
 
 输出**统一是 JSON**（`{"ok":true,...}` / `{"ok":false,"error":...}`）。
@@ -343,7 +343,7 @@ println(result.finalText)
 > ⚠️ **`apiKey` 更好的做法**：让宿主的服务端代理 LLM 请求，手机只跟自己的服务端说话。
 > 这样密钥永远不进 APK，也顺带拿到模型池、兜底与审计。
 > 直接把 key 打进 APK 等于把它发给每一个装了这个 App 的人。
-> （个人自用 / 内部工具另说。）
+> （个人自用 / 自建服务另说。）
 
 ### 换成别的服务：只改鉴权与地址
 
@@ -380,6 +380,7 @@ val client = ChatCompletionsClient(
 | `extraRequest` | `AndroidAgentSdk` | 透传任意 JSON 字段（厂商扩展参数） |
 | `maxTurns` | `AndroidAgentSdk` | 一轮最多几次模型往返，默认 32 |
 | `commandDetail` | `AndroidAgentSdk` | 提示词里的命令清单写多少（见下） |
+| `memoryPolicy` | `AndroidAgentSdk` | 上下文压缩与长期记忆的**开关 + 旋钮**（见「上下文压缩与长期记忆」一节） |
 | `extraNotes` | `AndroidAgentSdk` | 宿主自己的补充说明，拼进系统提示词 |
 
 > ⚠️ **`maxTokens` 与思考型模型**：推理 token 也算在这个额度里。额度给小了，
@@ -401,7 +402,7 @@ val client = ChatCompletionsClient(
 
 - 拟 Linux 环境（`HOME` / `PREFIX` / `TMPDIR` / `AGENT_TRASH` / `PATH`）；
 - 这台设备上**实测存在**的命令清单（白名单 ∩ 实际 stat，不写死）；
-- 设备能力清单（`termux-*`）与内部命令（`agent-*`）；
+- 设备能力清单（`termux-*`）与 SDK 自制命令（`agent-*`）；
 - 能力边界（哪些事做不了）；
 - 工作区维护规则（配额不写死、超限自己清）。
 
@@ -433,7 +434,7 @@ prefix（稳定）    +  history（只增不改）   +  suffix（易变）
 工作区告警
 ```
 
-两条硬规矩（踩过的坑）：
+两条硬规矩：
 
 1. **稳定前缀里不许有每轮变的数字。** 工作区告警以前写「占用 12.3MB（37%）」——
    数字每轮变 → 前缀每轮断 → **命中率从第 3 轮起归零**。现在是常量文本。
@@ -445,18 +446,115 @@ SDK 给你三样观测手段：
 ```kotlin
 result.usage      // Usage?：上游报的命中/未命中 token（不是本地估的）
 result.context    // ContextReport?：前缀有没有被动过、断点在下标几
+result.prefix     // PrefixReport?：**服务端**视角的前缀体检（网关回的）
 sdk.systemBudget()// 客户端 system 段会不会被网关截掉
 ```
 
-**上下文检测**靠 `ContextReport`：`prefixPreserved=false` 就说明**我们的布局坏了**
+**上下文检测**靠 `ContextReport`：`prefixPreserved=false` 就说明**布局坏了**
 （`firstChangedIndex` 指出被改的那条）；前缀没坏却没命中 = 缓存还没建起来，等着就行。
 
 > ⚠️ 体检器要**跨轮复用同一个实例**（`AndroidAgentSdk(inspector = …)`）——
 > 每轮新建的话它永远以为「这是第一次请求」，该报的漂移一个都发现不了。
 
+**为什么还要 `result.prefix`（服务端视角）**：
+请求的**头部**是服务端拼的（平台提示词 / 技能 / 工具定义）—— App 本地一条都看不见。
+运营改一句提示词，App 的本地检测器**全绿**，上游缓存却已经清零。
+`result.prefix` 是服务端那边**另起一份独立视角**复核的结论
+（对应一条通用不变量：*the live cache cannot vouch for itself* ——
+活着的缓存自己没法给自己作证）。
+⇒ **App 带 `session_id = …`**，网关据此记住「这个会话上一次请求长什么样」，逐条比对后回传。
+
 实测（真机 + 真实上游）：短问答 6 轮稳定前缀 1408 tokens → 命中率 84~91%；
-长前缀 4000 tokens → **95.3%**；官方明说 best-effort、**不保证 100%**。
-详细的规则、实测表与「怎么再往上抬」见《接入指南》11.11。
+把共享头部从 187 字符放大到 3453 字符 + 压住每轮新增后 → **92% → 94% 且仍在涨**；
+命中按 **64 token 台阶**往上跳（锯齿，不是平滑上升）。
+⚠️ **命中比未命中便宜 50 倍，而输出比未命中的输入还贵 4 倍** ——
+所以钱在「每轮新增」和「输出（思考链）」上，**不在命中率上**。
+详细的规则、实测表与「99% 到底需要什么条件」见《接入指南》11.11 与 11.12。
+
+
+## 上下文压缩与长期记忆
+
+聊天不可能一直聊下去。SDK 内置两件事管这件事，**旋钮全在一个 `ContextPolicy` 里**：
+
+| 场景 | SDK 做什么 |
+|---|---|
+| **一次请求超过容量** | 调一次模型把**旧历史**压成一段摘要，摘要进**稳定前缀**；最近的历史原样保留 |
+| **用户隔了很久才回话** | 把上一段话题总结成一条**长期记忆**落盘，然后**开一个新会话** |
+
+### 为什么摘要要放前缀，而不是直接删掉旧的
+
+上游是**前缀缓存**：只有逐字相同的前缀才命中。
+直接裁掉历史的头 = **前缀重置 = 一次全 miss**。
+压成摘要放进前缀，改动只发生一次，改完重新焐热就又稳了 —— 这是唯一不浪费缓存的做法。
+
+### 开起来
+
+```kotlin
+val sdk = AndroidAgentSdk.deepSeek(
+    context = context,
+    apiKey = key,
+    memoryPolicy = ContextPolicy(),          // 默认值就是推荐值
+)
+```
+
+不想开就**不传**（默认 `null`）—— 历史只增不减。
+
+### 旋钮（要调就是调这些）
+
+| 参数 | 作用 | 默认 |
+|---|---|---|
+| `maxContextChars` | 一次请求的**总字符预算**，超了触发一次压缩 | 24,000 |
+| `keepRecentChars` | 压缩时**原样保留**的最近历史字符数 | 6,000 |
+| `summaryTargetChars` | 摘要的目标长度 | 1,200 |
+| `idleArchiveMillis` | 闲置多久算「这个话题结束了」 | 30 分钟 |
+| `memoryDigestChars` | 长期记忆进提示词的预算 | 1,500 |
+| `maxMemoryEntries` | 最多留多少条记忆 | 100 |
+
+容量按**字符数**算 —— SDK 没有分词器，就不编 token 估算（中文约 1 字符 ≈ 0.6 token）。
+DeepSeek 官方两个模型都是 64K 上下文，默认 24,000 字符（约 15K token）离上限很远。
+
+⚠️ 调小 `maxContextChars` 时 `keepRecentChars` 要跟着调小 ——
+保留的原文比预算还大的话，压缩等于没压。
+
+### 记忆存在哪
+
+```
+<filesDir>/agent/var/memory/
+├── index.json                ← 索引（id / 时间 / 标题）
+└── entries/20261028-1432.md  ← 一条一份，纯 markdown
+```
+
+**是普通文件，不是数据库** —— 所以 agent 用**已有的终端能力**就能读：
+
+```bash
+cat $AGENT_ROOT/var/memory/index.json
+cat $AGENT_ROOT/var/memory/entries/*.md
+```
+
+**不需要给 SDK 加任何新工具**。用法见 `skills/agent-memory/SKILL.md`。
+
+### 宿主要做什么
+
+只有一件事：**把 `TurnResult.messages` 存回去**。
+压缩 / 归档后的历史已经在里面了 —— 照存就行，历史不会越滚越大。
+
+```kotlin
+val result = sdk.runTurn(history)
+history = result.messages.toMutableList()   // ← 压缩后的那份
+```
+
+### 手动归档
+
+用户主动说「这个话题结束了」时，可以立刻归档：
+
+```kotlin
+sdk.memory()?.archiveNow(history)
+```
+
+### 代价
+
+压缩和归档**各要调一次模型**（真花钱）。这是有意的 ——
+它们发生在「上下文已经太长」或「话题确实结束了」的时候，不是每轮都做。
 
 
 ## 演示 App
@@ -522,7 +620,7 @@ adb logcat -d -s AgentSdkDemo
 跑 **ELF 二进制不行** —— `targetSdk ≥ 29` 时私有目录里的可执行文件直接 EACCES
 （唯一豁免是 `nativeLibraryDir`，那要按 ABI 拆包）。
 
-## 工作区、内部命令与技能目录
+## 工作区、SDK 自制命令与技能目录
 
 agent 不是「跑完一条命令就完了」——它在一个**隔离工作区**里长期干活，
 自己产生的垃圾自己清，超配额时会被提醒。详见《接入指南》第十一节。
@@ -550,11 +648,11 @@ agent 不是「跑完一条命令就完了」——它在一个**隔离工作区
 - 目录里放一个空文件 `.agent-keep` → 整个目录不动；
 - 超限（到 85% 就开始提醒）时，宿主把一条**可执行**的告警插进对话 → **agent 自己清理**。
 
-### 内部命令（`agent-` 前缀，不在 Termux:API 里）
+### SDK 自制命令（`agent-` 前缀，不在 Termux:API 里）
 
 `agent-workspace` / `agent-cleanup` / `agent-quota` / `agent-schedule` / `agent-http-get` / `agent-http-post`。
 
-用**另一个前缀**是为了不让模型把内部命令误当成 Termux 命令到处找；
+用**另一个前缀**是为了不让模型把 SDK 自制命令误当成 Termux 命令到处找；
 系统提示词里也会**分开介绍**这两类。
 
 ### 宿主自己的数据 API
@@ -573,7 +671,7 @@ toybox 的子命令集合跟系统版本走（`awk`/`xxd`/`stat`/`timeout` 都�
 写死一份清单，在老机型上就是在骗模型：它会一次次去试，每次失败还要在工作区里留垃圾。
 
 - 白名单**故意不收** `pm` / `am` / `dumpsys` / `su` —— 它们在 `/system/bin` 里确实存在，
-  但要么要特权、要么会引出「装应用 / 点屏」这种我们故意不做的事；模型看见 `pm install` 就会去试。
+  但要么要特权、要么会引出「装应用 / 点屏」这种故意不做的事；模型看见 `pm install` 就会去试。
 - 也**不探** `PREFIX/bin`（拟 Linux 根）：它在宿主私有目录里，而 Android 对私有目录是 noexec 的，
   那里的 ELF 执行不了（真机实测 exit=126）—— 列进去同样是骗模型。
 - 宿主可以**不接模型**就拿到这份提示词（展示 / 调试 / 核对）：
@@ -587,24 +685,24 @@ toybox 的子命令集合跟系统版本走（`awk`/`xxd`/`stat`/`timeout` 都�
 这时就显式传 `commandDetail = AgentSystemPrompt.CommandDetail.CORE`：
 提示词只写**核心命令**（仍然是白名单 ∩ 实存），**完整清单在 `skills/android-capability`** 里按需查。
 
-实测（真机等价输入，`DevicePromptBudgetTest` 复刻并交叉校验过）：**核心模式 1809 字符**，
-装得进 2000 预算（余量 191）；**完整模式 2209 字符**。
+实测（真机等价输入，`DevicePromptBudgetTest` 复刻并交叉校验过）：**核心模式 1797 字符**，
+装得进 2000 预算（余量 203）；**完整模式 2197 字符**。
 环境段也一起压了：只写一次绝对路径（工作区根），子路径用 `$AGENT_ROOT/…` `$PREFIX/…` 拼 ——
 这些变量在 shell 里是真设了的，模型写出来直接能跑。
 
 | 模式 | 提示词内容 | 真机长度 |
 |---|---|---|
-| `FULL`（默认） | 全部探测到的命令（82 条）+ 能力清单 + 边界 + 工作区规则 | 2209 字符 |
-| `CORE` | 核心命令（28 条）+ 能力清单 + 边界 + 工作区规则 | 1809 字符 |
+| `FULL`（默认） | 全部探测到的命令（82 条）+ 能力清单 + 边界 + 工作区规则 | 2197 字符 |
+| `CORE` | 核心命令（28 条）+ 能力清单 + 边界 + 工作区规则 | 1797 字符 |
 
-⚠️ `CORE` 模式**故意不教原生 `curl -H`** —— 免得模型为了调内部接口就写
+⚠️ `CORE` 模式**故意不教原生 `curl -H`** —— 免得模型为了调宿主的数据接口就写
 `curl -H 'Authorization: Bearer …'`，那会把凭证写进命令历史和转录；
 正确做法是走 `agent-http-get` / `agent-http-post`（鉴权由宿主注入，命令里没有 token）。
 
 > ⚠️ **这份清单只管「告诉模型什么」，不管「拦不让你跑」。**
 > 真机实测：`/system/bin` 有 **434** 个可执行文件，提示词只介绍了 **82** 个 ——
 > 剩下 **352** 个（`vmstat`/`strace`/`top`/`dumpsys`…）**照样能跑**。
-> 被我们接管的是**注册过的能力命令**（13 个），其它一律原样丢给 `/system/bin/sh`。
+> 被接管的是**注册过的能力命令**（13 个），其它一律原样丢给 `/system/bin/sh`。
 > 详见《接入指南》11.8。
 
 ### 定时任务
@@ -614,7 +712,7 @@ toybox 的子命令集合跟系统版本走（`awk`/`xxd`/`stat`/`timeout` 都�
 
 ### 技能目录
 
-`skills/` 下：`agent-workspace`（环境与维护规范）、`agent-data-api`（内部接口调用）、
+`skills/` 下：`agent-workspace`（环境与维护规范）、`agent-data-api`（宿主数据接口调用）、
 `agent-scheduling`（定时任务）、`android-capability`（硬件能力速查）。
 
 ## 五条必须知道的硬约束
@@ -699,7 +797,7 @@ val sdk = AndroidAgentSdk(
 2. **脚本里的包名路径**同样写死 `com.termux`（例如 `bin/am` 里的 `AM_APK_PATH`）。
 3. **`bin/am` 是 Termux 私有实现**，靠 `libexec/termux-am/am.apk` + app 进程内的 socket server；系统自带的 `/system/bin/am` 会被 prefix 遮住。
 
-### 这一版修掉的问题（原先编译不过 / lint 不过）
+### 已修复的构建问题（早期版本编译 / lint 不通过）
 
 - `Process.waitFor(timeout)` 与 `destroyForcibly()` 都是 **API 26** 才有的，而模块声明 `minSdk 24` —— Android 7.0/7.1 上走超时分支会 `NoSuchMethodError`。改成「独立等待线程 + `Thread.join(timeout)`」（`Thread.join` 是 API 1，行为跨版本一致），强杀再按 `SDK_INT` 分流。
 - 写死的 `DEFAULT_FILES_DIR = "/data/data/ai.agentkernel/files"`：宿主包名根本不是 `ai.agentkernel`，多用户下真实路径是 `/data/user/<userId>/<pkg>`。写错的代价是**静默**的 —— 命令照样跑得起来（PATH 里还有 `/system/bin`），但 HOME / PREFIX / TMPDIR 指到别人的目录，写文件直接失败。现在 `PrefixLayout` 必填，另给 `AndroidCommandExecutor.forContext(context)` 一行写法。

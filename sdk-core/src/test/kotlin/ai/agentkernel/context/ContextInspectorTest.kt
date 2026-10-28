@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
  *
  * 命中低有两种完全不同的原因，处置也相反：
  * - 前缀**没被动过**却没命中 → 缓存还没建起来（第 1-2 轮正常，等着就行）；
- * - 前缀**被改过** → **我们的布局有 bug**（比如把系统提示词拼进了历史、
+ * - 前缀**被改过** → **布局有 bug**（比如把系统提示词拼进了历史、
  *   或者告警里塞了每轮变的数字），缓存从那儿起全废。
  *
  * 所以 [ContextReport.prefixPreserved] 与 [ContextReport.firstChangedIndex]

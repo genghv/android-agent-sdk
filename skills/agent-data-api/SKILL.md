@@ -1,6 +1,6 @@
 ---
 name: agent-data-api
-description: 在安卓设备上调用内部数据接口取数的约定——用 agent-http-get/agent-http-post 发请求、鉴权由宿主注入所以命令里不出现 token、相对路径怎么拼、非 2xx 和明文 HTTP 怎么处理。当需要从内部 API 拿数据（而不是让用户手动打开 App）时使用。
+description: 在安卓设备上调用宿主数据接口取数的约定——用 agent-http-get/agent-http-post 发请求、鉴权由宿主注入所以命令里不出现 token、相对路径怎么拼、非 2xx 和明文 HTTP 怎么处理。当需要从宿主 API 拿数据（而不是让用户手动打开 App）时使用。
 ---
 
 # 宿主数据 API 调用（agent-http-*）
@@ -27,7 +27,7 @@ agent-http-post <url 或相对路径> [--header "K: V"] [--data "{...}"] [--time
 
 ### 相对路径怎么用
 
-宿主配了基地址（内部 API 的根，比如 `https://internal.corp/api`）时，
+宿主配了基地址（宿主 API 的根，比如 `https://host.example/api`）时，
 你写相对路径就行：
 
 ```bash

@@ -82,6 +82,9 @@ class MainActivity : ComponentActivity() {
         // 命令行触发拉档位清单（验清单接口，不碰屏幕）：
         //   adb shell am start -n com.agentkernel.demo/.MainActivity --ez autorun_efforts true
         val autorunEfforts = intent?.getBooleanExtra("autorun_efforts", false) ?: false
+        // 命令行触发记忆子系统自检（归档 / 落盘 / 摘要块 / 压缩）：
+        //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_memory true
+        val autorunMemory = intent?.getBooleanExtra("autorun_memory", false) ?: false
         // 网关配置也能从命令行注入（**运行时**的，token 不进 APK）：
         //   --es gateway_url ... --es gateway_token ... --es gateway_model ...
         // 思考强度用**强度编码**注入（2 的幂：1=关闭思考 2=low 4=medium 8=high 16=max）：
@@ -92,9 +95,15 @@ class MainActivity : ComponentActivity() {
             intent?.getStringExtra("gateway_model"),
             intent?.getIntExtra("reasoning_strength", 0)?.takeIf { it > 0 },
         )
+        // 压缩/归档的旋钮也能从命令行注入（回归用；不传就用 SDK 的推荐值）：
+        //   --ei autorun_memory_max_chars 500   --ei autorun_memory_idle_min 1
+        state.applyMemoryPolicy(
+            intent?.getIntExtra("autorun_memory_max_chars", 0)?.takeIf { it > 0 },
+            intent?.getIntExtra("autorun_memory_idle_min", 0)?.takeIf { it > 0 },
+        )
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                DemoApp(state, autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts)
+                DemoApp(state, autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory)
             }
         }
     }
@@ -109,12 +118,13 @@ fun DemoApp(
     autorunChat: String? = null,
     autorunChatMulti: String? = null,
     autorunEfforts: Boolean = false,
+    autorunMemory: Boolean = false,
 ) {
     var tab by remember {
         mutableStateOf(
             if (!autorunChat.isNullOrBlank() || !autorunChatMulti.isNullOrBlank()) {
                 2
-            } else if (autorunSelfCheck || autorunTorch) {
+            } else if (autorunSelfCheck || autorunTorch || autorunMemory) {
                 1
             } else {
                 0
@@ -135,16 +145,19 @@ fun DemoApp(
     // 两条路径**互斥**（一次只跑一条），免得并发抢同一个 torch。
     // ★ 一律走 state.start*() —— 它们在 **viewModelScope** 里跑，
     //   activity 重建不会把正在跑的 agent 循环掐断（详见 DemoState.startChatAutorun）。
-    LaunchedEffect(autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts) {
+    LaunchedEffect(autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory) {
         android.util.Log.i(
             "AgentSdkDemo",
             "[CHAT] [effect-enter] selfcheck=$autorunSelfCheck torch=$autorunTorch " +
-                "chatLen=${autorunChat?.length} multiLen=${autorunChatMulti?.length} efforts=$autorunEfforts",
+                "chatLen=${autorunChat?.length} multiLen=${autorunChatMulti?.length} efforts=$autorunEfforts " +
+                "memory=$autorunMemory",
         )
         if (autorunTorch) {
             state.startTorchCheck()
         } else if (autorunSelfCheck) {
             state.startSelfCheck()
+        } else if (autorunMemory) {
+            state.startMemoryCheck()
         } else if (!autorunChatMulti.isNullOrBlank()) {
             // 多轮：用来观察缓存命中率随轮次的上升曲线。
             state.startChatMultiAutorun(
@@ -271,7 +284,7 @@ fun CapabilitiesScreen(state: DemoState, padding: PaddingValues) {
             }
         }
 
-        SectionTitle("内部拟 Linux 自制命令（agent- 前缀，不在 Termux:API 里）")
+        SectionTitle("SDK 自制命令（agent- 前缀，不在 Termux:API 里）")
         CapabilityCatalog.internalCommands.chunked(2).forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 row.forEach { spec ->

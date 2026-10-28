@@ -1,8 +1,17 @@
 package ai.agentkernel.memory
 
+import ai.agentkernel.archive.ArchiveSegmentMeta
+import ai.agentkernel.archive.ArchiveStore
 import ai.agentkernel.protocol.AssistantMessage
+import ai.agentkernel.protocol.ChatMessage
+import ai.agentkernel.protocol.SystemMessage
+import ai.agentkernel.protocol.ToolCall
+import ai.agentkernel.protocol.ToolMessage
 import ai.agentkernel.protocol.UserMessage
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -26,12 +35,14 @@ class ContextMemoryTest {
         llm: FakeLlm,
         policy: ContextPolicy,
         now: () -> Long,
+        archive: ArchiveStore? = null,
     ) = ContextMemory(
         llm = llm,
         model = "test-model",
         store = MemoryStore(tempDir()),
         policy = policy,
         clock = now,
+        archive = archive,
     )
 
     private fun bigHistory(n: Int, size: Int = 60): List<UserMessage> =
@@ -67,8 +78,8 @@ class ContextMemoryTest {
         assertEquals(1, llm.requests.size, "只压一次")
         assertNotNull(plan.summary, "压缩完要有摘要")
         assertTrue(plan.history.size < history.size, "历史应该变短")
-        // 摘要请求不能带工具 —— 那是给模型调工具用的
-        assertTrue(llm.requests[0].tools.isEmpty(), "摘要请求不该带工具")
+        // ⚠️ 压缩请求的 tools **必须与主请求逐字一致**（否则那次调用不吃缓存）——
+        //    这条断言在「压缩请求是逐字重放的」那条里。
     }
 
     @Test
@@ -83,20 +94,91 @@ class ContextMemoryTest {
     }
 
     @Test
-    fun `第二次压缩要把上一次的摘要一起压`() = runBlocking {
+    fun `第二次压缩靠重放前缀带上一次的摘要`() = runBlocking {
         val llm = FakeLlm()
         var now = 1_000_000L
         val mem = memory(llm, ContextPolicy(maxContextChars = 500, keepRecentChars = 100), { now })
 
-        mem.prepare(bigHistory(20), prefixChars = 0)
-        mem.prepare(bigHistory(20), prefixChars = 0)
+        // 主请求的稳定前缀里带着上一轮的摘要（它本来就是一个 system 段）。
+        val priorSummary = SystemMessage("## 之前的对话摘要（压缩后的历史）\n用户在配网关")
+        mem.prepare(bigHistory(20), prefixChars = 0, replayPrefix = listOf(priorSummary))
+        mem.prepare(bigHistory(20), prefixChars = 0, replayPrefix = listOf(priorSummary))
 
         assertEquals(2, llm.requests.size)
-        val secondBody = (llm.requests[1].messages[1] as UserMessage).content
+        val second = llm.requests[1]
+        // 上一轮的摘要**逐字**出现在重放的前缀里 —— 否则第一次压掉的内容就永久丢了
+        assertEquals(listOf<ChatMessage>(priorSummary), second.messages.take(1))
         assertTrue(
-            secondBody.contains("【已有的摘要】"),
-            "第二次压缩必须带上一次的摘要，否则第一次压掉的内容就永久丢了：$secondBody",
+            second.messages.none { it is UserMessage && it.content.contains("用户在配网关") },
+            "上一轮摘要不该再被塞进 user 消息（会变成同一段内容出现两遍）：" +
+                (second.messages.last() as UserMessage).content,
         )
+    }
+
+    // ---- 压缩请求的形状（dsh 式逐字重放）----
+
+    @Test
+    fun `压缩请求是逐字重放的`() = runBlocking {
+        val llm = FakeLlm()
+        var now = 1_000_000L
+        val mem = memory(llm, ContextPolicy(maxContextChars = 500, keepRecentChars = 100), { now })
+
+        val replayPrefix = listOf<ChatMessage>(
+            SystemMessage("你是设备上的助手"),
+            SystemMessage("## 你之前和用户聊过什么（长期记忆）\n- 配网关"),
+        )
+        val tools = listOf(
+            buildJsonObject {
+                put("type", "function")
+                put("function", buildJsonObject { put("name", "bash") })
+            }
+        )
+        val history = bigHistory(20)
+
+        mem.prepare(history, prefixChars = 0, replayPrefix = replayPrefix, tools = tools)
+
+        val request = llm.requests.single()
+        // ① 前缀 → 被遮蔽区（原样）→ 压缩指令（最后一条）
+        val middle = request.messages.drop(replayPrefix.size).dropLast(1)
+        assertTrue(middle.isNotEmpty(), "被遮蔽区不该是空的")
+        assertEquals(replayPrefix, request.messages.take(replayPrefix.size))
+        assertEquals(history.take(middle.size), middle, "被遮蔽区必须逐字重放")
+        assertTrue(request.messages.last() is UserMessage, "最后一条必须是压缩指令（user 消息）")
+
+        // ② 被遮蔽区的内容**逐字**出现，不是 render 出来的「[用户] …」文本
+        val contents = request.messages.filterIsInstance<UserMessage>().map { it.content }
+        assertTrue(
+            contents.contains("消息1 " + "x".repeat(60)),
+            "被遮蔽区的消息必须逐字出现：$contents",
+        )
+        assertTrue(
+            contents.none { it.startsWith("[用户]") },
+            "不能把消息渲染成文本 —— 那样前缀对不上、缓存不命中：$contents",
+        )
+
+        // ③ tools 与主请求**完全一致**（不一致 = 压缩这次调用不吃缓存）
+        assertEquals(tools, request.tools)
+
+        // ④ 网关据此识别压缩请求
+        assertEquals(JsonPrimitive(true), request.extra["compact"])
+    }
+
+    @Test
+    fun `压缩指令在同一 targetChars 下逐字相同`() = runBlocking {
+        val llm = FakeLlm()
+        val summarizer = ConversationSummarizer(llm, "test-model")
+
+        summarizer.summarize(listOf(UserMessage("要压的内容")), targetChars = 1_200)
+        summarizer.summarize(listOf(UserMessage("要压的内容")), targetChars = 1_200)
+        summarizer.summarize(listOf(UserMessage("要压的内容")), targetChars = 800)
+
+        val first = (llm.requests[0].messages.last() as UserMessage).content
+        val second = (llm.requests[1].messages.last() as UserMessage).content
+        val other = (llm.requests[2].messages.last() as UserMessage).content
+        // 指令会进请求 —— 差一个字就多一次缓存失效
+        assertEquals(first, second, "同一 targetChars 下指令必须逐字相同")
+        assertTrue(first != other, "不同 targetChars 的指令应该不同（长度约束得生效）")
+        assertTrue(first.contains("1200"), "指令里要带上长度约束：$first")
     }
 
     @Test
@@ -111,6 +193,44 @@ class ContextMemoryTest {
         assertTrue(!plan.compacted)
         assertEquals(history, plan.history)
         assertEquals(0, llm.requests.size)
+    }
+
+    @Test
+    fun `切分点不能落在工具结果上`() = runBlocking {
+        val llm = FakeLlm()
+        var now = 1_000_000L
+        // keepRecentChars 调得刚好让切分点落在那条 ToolMessage 上。
+        val mem = memory(llm, ContextPolicy(maxContextChars = 200, keepRecentChars = 150), { now })
+
+        val history: List<ChatMessage> = listOf(
+            UserMessage("A" + "x".repeat(100)),
+            AssistantMessage(
+                content = null,
+                toolCalls = listOf(ToolCall(id = "c1", name = "bash", arguments = "{}")),
+            ),
+            ToolMessage("c1", "B" + "y".repeat(100)),
+            UserMessage("C" + "z".repeat(100)),
+        )
+
+        val plan = mem.prepare(history, prefixChars = 0)
+
+        assertTrue(plan.compacted, "该压还是要压")
+        // ① 主请求的保留段不能以工具结果开头 —— 它的 assistant(tool_calls) 已经被压进摘要了
+        assertTrue(
+            plan.history.first() !is ToolMessage,
+            "保留段不能以工具结果开头（它的 tool_calls 被压没了，上游会 400）：${plan.history.first()}",
+        )
+        // ② 压缩请求重放的前缀不能以「没被回答的 tool_calls」结尾
+        val replayed = llm.requests.single().messages.dropLast(1)
+        assertTrue(
+            replayed.none { it is AssistantMessage && it.toolCalls.isNotEmpty() },
+            "被遮蔽区里不能有没被回答的工具调用：$replayed",
+        )
+        // ③ 工具调用那一组要**整组**留在保留段里
+        assertTrue(
+            plan.history.any { it is AssistantMessage && it.toolCalls.isNotEmpty() },
+            "assistant(tool_calls) 应该和它的工具结果留在同一侧：${plan.history}",
+        )
     }
 
     // ---- 闲置归档 ----
@@ -198,5 +318,88 @@ class ContextMemoryTest {
         val entry = mem.archiveNow(listOf(UserMessage("问题"), AssistantMessage("回答"), UserMessage("新一轮")))
         assertNotNull(entry)
         assertEquals(1, mem.memoryStore().list().size)
+    }
+
+    // ---- 分段归档（原文留存）----
+
+    @Test
+    fun `压缩掉的原文会落一段归档`() = runBlocking {
+        val llm = FakeLlm()
+        var now = 1_000_000L
+        val archive = ArchiveStore(tempDir())
+        val mem = memory(llm, ContextPolicy(maxContextChars = 500, keepRecentChars = 100), { now }, archive)
+
+        val history = bigHistory(20)
+        val plan = mem.prepare(history, prefixChars = 0)
+
+        // ★ 摘要**不删原文** —— 被压掉的那一段要能在归档里原样找回来。
+        val segment = plan.archivedSegment
+        assertNotNull(segment, "压缩完要回报新落的归档段")
+        assertEquals(ArchiveSegmentMeta.KIND_COMPACT, segment.kind)
+
+        val stored = archive.read(segment.id)
+        assertNotNull(stored, "归档段要能读回来")
+        assertTrue(stored.messages.isNotEmpty(), "归档段里要有原文")
+        assertTrue(
+            stored.messages.any { it is UserMessage && it.content.startsWith("消息1 ") },
+            "归档里要能翻到被压掉的第一条原文",
+        )
+        // 压缩后主请求里的历史变短了，但归档里那段是**全的**
+        assertTrue(stored.messages.size < history.size, "归档的是被压掉的那一段，不是整段历史")
+    }
+
+    @Test
+    fun `闲置归档的原文也会落一段归档`() = runBlocking {
+        val llm = FakeLlm()
+        var now = 1_000_000L
+        val archive = ArchiveStore(tempDir())
+        val mem = memory(llm, ContextPolicy(idleArchiveMillis = 60_000), { now }, archive)
+
+        mem.prepare(listOf(UserMessage("第一个问题"), AssistantMessage("回答")), prefixChars = 0)
+        now += 120_000
+        val plan = mem.prepare(
+            listOf(UserMessage("第一个问题"), AssistantMessage("回答"), UserMessage("新问题")),
+            prefixChars = 0,
+        )
+
+        val segment = plan.archivedSegment
+        assertNotNull(segment, "闲置归档也要落一段")
+        assertEquals(ArchiveSegmentMeta.KIND_IDLE, segment.kind)
+
+        val stored = archive.read(segment.id)!!
+        assertEquals(2, stored.messages.size, "归档的是「上一段」对话，不含本轮新问题")
+        assertEquals("第一个问题", (stored.messages[0] as UserMessage).content)
+    }
+
+    @Test
+    fun `不配归档仓库也不影响压缩`() = runBlocking {
+        val llm = FakeLlm()
+        var now = 1_000_000L
+        val mem = memory(llm, ContextPolicy(maxContextChars = 500, keepRecentChars = 100), { now })
+
+        val plan = mem.prepare(bigHistory(20), prefixChars = 0)
+
+        assertTrue(plan.compacted)
+        assertNull(plan.archivedSegment, "没配归档仓库就不该有归档段")
+        assertNull(mem.archiveStore())
+    }
+
+    @Test
+    fun `多次压缩会落多段且段间有链`() = runBlocking {
+        val llm = FakeLlm()
+        var now = 1_000_000L
+        val archive = ArchiveStore(tempDir())
+        val mem = memory(llm, ContextPolicy(maxContextChars = 500, keepRecentChars = 100), { now }, archive)
+
+        mem.prepare(bigHistory(20), prefixChars = 0)
+        now += 1_000
+        mem.prepare(bigHistory(20), prefixChars = 0)
+
+        assertEquals(2, archive.size(), "压两次就该有两段归档")
+        val list = archive.list()
+        assertEquals(2, list.size)
+        // 链：更早的那段的 nextId 指向更晚的
+        assertEquals(list[0].id, list[1].nextId)
+        assertEquals(list[1].id, list[0].prevId)
     }
 }

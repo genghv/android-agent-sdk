@@ -6,6 +6,8 @@ import ai.agentkernel.android.OkHttpTransport
 import ai.agentkernel.android.device.AgentHttpCapabilities
 import ai.agentkernel.android.device.AgentWorkspaceCapabilities
 import ai.agentkernel.android.device.defaultDeviceCapabilities
+import ai.agentkernel.archive.ArchiveSegmentMeta
+import ai.agentkernel.archive.ArchiveStore
 import ai.agentkernel.device.DeviceCapabilityRegistry
 import ai.agentkernel.kernel.KernelEvent
 import ai.agentkernel.kernel.TurnResult
@@ -19,6 +21,8 @@ import ai.agentkernel.memory.MemoryStore
 import ai.agentkernel.prompt.AgentSystemPrompt
 import ai.agentkernel.protocol.AssistantMessage
 import ai.agentkernel.protocol.ChatMessage
+import ai.agentkernel.protocol.SystemMessage
+import ai.agentkernel.protocol.ToolMessage
 import ai.agentkernel.protocol.UserMessage
 import android.app.Application
 import android.content.Context
@@ -27,9 +31,13 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
+// ★ 归档页用 viewModelScope 起协程（这是扩展属性，必须单独 import）。
+//   少了它 Demo 直接编译不过 —— 而它挂在共享工作区上，会连累别人的构建。
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -111,9 +119,22 @@ class DemoState(app: Application) : AndroidViewModel(app) {
         },
     )
 
+    /**
+     * 长期记忆能力（`agent-memory`）：agent 自己增删改查自己的记忆。
+     *
+     * 路径由 SDK 算（[AndroidAgentSdk.memoryCapabilities]）—— 别自己拼，
+     * 拼错了会「agent 写进 A 目录、SDK 从 B 目录读」，表现成「写了没反应」。
+     */
+    val memoryCaps = AndroidAgentSdk.memoryCapabilities(context)
+
     /** 能力注册表：与《接入指南》里宿主该用的完全一样。 */
     val capabilities: DeviceCapabilityRegistry = DeviceCapabilityRegistry(
-        defaultDeviceCapabilities(context, workspace = workspace, http = http)
+        defaultDeviceCapabilities(
+            context,
+            workspace = workspace,
+            http = http,
+            memory = memoryCaps,
+        )
     )
 
     /** 执行器：也是宿主该用的那个入口。 */
@@ -135,8 +156,9 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      * **验了一份模型根本没看到的提示词** —— 自检会显示 ✅，而真机上的提示词早被服务端截断了。
      * （真机实测：自检显示 2197 字符、实际对话用的是 1797。）
      *
-     * Demo 取 **CORE**（1797 字符）：它是「在会把 system 段截断到 2000 的服务上也装得下」的
-     * **安全值** —— 换成哪个服务都不会被砍掉提示词尾部。
+     * Demo 取 **CORE**（1797 字符）：它是「在**上限被调小**的服务上也装得下」的
+     * **安全值** —— 就算运营把网关的 `client_system_max_chars` 调回老值 2000，
+     * 提示词尾部也不会被砍掉。
      * 直连 DeepSeek 官方没有这个上限，那边可以用 SDK 的默认值 FULL（2197 字符）。
      */
     private val commandDetail = AgentSystemPrompt.CommandDetail.CORE
@@ -188,9 +210,12 @@ class DemoState(app: Application) : AndroidViewModel(app) {
         val memory = ContextMemory(
             llm = client,
             model = gatewayModel,
-            // 记忆落在 agent 私有根下 —— 普通文件，agent 用终端就能读。
+            // 记忆落在 agent 私有根下 —— 普通文件，agent 用终端就能读，
+            // 也能用 `agent-memory` 命令增删改查（那条命令用的就是这个目录）。
             store = MemoryStore(File(executor.layout.varDir, AndroidAgentSdk.MEMORY_DIR)),
             policy = memoryPolicy,
+            // ★ 摘要掉的**原文**落在这里 —— 界面照样能翻出那些对话。
+            archive = archiveStore(),
         )
         cachedClient = client
         cachedMemory = memory
@@ -340,6 +365,125 @@ class DemoState(app: Application) : AndroidViewModel(app) {
 
     /** autorun 的调用序号 —— 用来判断「同一轮被跑了两次」这类问题。 */
     private var chatAutorunSeq = 0
+
+    // ---- 归档历史（前端翻历史用）----
+
+    /**
+     * 归档里的一行（对应一条原始消息）。
+     *
+     * 归档存的是**结构化**的消息（不是渲染好的文本）——
+     * 所以前端能照常区分「谁说的」「工具返回了什么」。
+     */
+    data class ArchiveLine(val who: String, val text: String)
+
+    /** 一段归档（前端展示用）。 */
+    data class ArchiveView(
+        val id: String,
+        val createdAt: Long,
+        val kind: String,
+        val title: String,
+        val summary: String?,
+        /** 更早的一段（往上滚时顺着它走）。 */
+        val prevId: String?,
+        /** 更晚的一段。 */
+        val nextId: String?,
+        val lines: List<ArchiveLine>,
+    )
+
+    /**
+     * 已加载的归档段 —— **新的在前**（下标 0 = 最新的一段）。
+     *
+     * 列表底部是最新的一段（进页面先看它），往上滚才把**更早**的一段追加到末尾。
+     * 这样「往上滚」天然对应「往时间上翻」。
+     */
+    val archiveSegments = mutableStateListOf<ArchiveView>()
+
+    /** 正在加载更早的一段。 */
+    var archiveLoading by mutableStateOf(false)
+
+    /** 还有更早的段吗（false = 到头了）。 */
+    var archiveHasMore by mutableStateOf(false)
+
+    /** 归档仓库（路径与 SDK 内部那份一致）。 */
+    private fun archiveStore() =
+        ArchiveStore(File(executor.layout.varDir, AndroidAgentSdk.ARCHIVE_DIR))
+
+    /**
+     * 进归档页：只取**最新一段**。
+     *
+     * ★ 首屏**不整包拉** —— 历史可能很长，全拉进内存既慢又占地方。
+     *   要看更早的就往上滚，一段一段来。
+     */
+    fun loadLatestArchive() {
+        viewModelScope.launch {
+            val store = archiveStore()
+            val latest = withContext(Dispatchers.IO) { store.list(limit = 1) }
+            val total = withContext(Dispatchers.IO) { store.size() }
+            val views = withContext(Dispatchers.IO) { latest.map { readArchiveView(store, it) } }
+            archiveSegments.clear()
+            archiveSegments.addAll(views)
+            archiveHasMore = total > views.size
+            log(
+                "ARCHIVE",
+                "首屏加载 ${views.size} 段（库里共 $total 段）· 还有更早=${archiveHasMore} · " +
+                    "最新=${views.firstOrNull()?.id ?: "-"}",
+            )
+        }
+    }
+
+    /**
+     * 往上滚：加载**更早的一段**。
+     *
+     * 游标 = 当前已加载的**最老**那一段 —— 存储层照着链往回走，
+     * 所以不会出现「跳段」或「重复」。
+     */
+    fun loadOlderArchive() {
+        if (archiveLoading || !archiveHasMore) return
+        val oldest = archiveSegments.lastOrNull() ?: return
+        archiveLoading = true
+        viewModelScope.launch {
+            try {
+                val store = archiveStore()
+                val older = withContext(Dispatchers.IO) { store.list(limit = 1, before = oldest.id) }
+                if (older.isEmpty()) {
+                    archiveHasMore = false
+                } else {
+                    val view = withContext(Dispatchers.IO) { readArchiveView(store, older.first()) }
+                    // 新的在前 ⇒ 更早的一段**追加到末尾**
+                    archiveSegments.add(view)
+                    log("ARCHIVE", "往上翻：加载更早的一段 ${view.id}（共 ${archiveSegments.size} 段已加载）")
+                }
+            } finally {
+                archiveLoading = false
+            }
+        }
+    }
+
+    /** 读一段归档，转成前端要的形状。 */
+    private fun readArchiveView(store: ArchiveStore, meta: ArchiveSegmentMeta): ArchiveView {
+        val messages = store.read(meta.id)?.messages.orEmpty()
+        return ArchiveView(
+            id = meta.id,
+            createdAt = meta.createdAt,
+            kind = meta.kind,
+            title = meta.title,
+            summary = meta.summary,
+            prevId = meta.prevId,
+            nextId = meta.nextId,
+            lines = messages.map { m ->
+                when (m) {
+                    is UserMessage -> ArchiveLine("你", m.content)
+                    is AssistantMessage -> ArchiveLine(
+                        "模型",
+                        m.content ?: m.toolCalls.joinToString("\n") { "→ ${it.name}(${it.arguments})" },
+                    )
+                    is ToolMessage -> ArchiveLine("工具", m.content)
+                    is SystemMessage -> ArchiveLine("系统", m.content)
+                    else -> ArchiveLine("", "")
+                }
+            },
+        )
+    }
 
     // ---- 手电筒（开关，不是「只能开」） ----
 
@@ -640,6 +784,8 @@ class DemoState(app: Application) : AndroidViewModel(app) {
             //    普通 App 没有读权限，File.list() 必然返回 null（真机上出现过：清单探出 0 条）。
             //    （复核用的是同一套 stat 机制，但代码是独立写的；
             //     真正独立的证据是下面**实跑**那几条 —— 「存在」不等于「能跑」。）
+            // 客户端 system 段上限（与网关的 client_system_max_chars 默认值一致；那边是可调参数）。
+            val segLimit = AndroidAgentSdk.DEFAULT_SYSTEM_BUDGET_LIMIT_CHARS
             val reallyThere = setOf("/system/bin", "/system/xbin")
             val missing = claimed.filterNot { cmd ->
                 reallyThere.any { dir -> File(dir, cmd).exists() }
@@ -671,8 +817,8 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                         val firstLine = r.output.trim().lineSequence().firstOrNull().orEmpty()
                         appendLine("$name → exit=${r.exitCode} $firstLine")
                     }
-                    // 提示词有多长 —— 有的服务会把 system 段**截断到 2000 字符**，
-                    // 超了就砍尾巴（工作区规则那几段正好在最后）。这个数字得看得见。
+                    // 提示词有多长 —— 网关会把客户端 system 段**截到上限**，超了就砍尾巴
+                    //（长期记忆 digest / 会话摘要 / 工作区告警正好排在最后）。这个数字得看得见。
                     val promptLen = systemPrompt.length
                     val fullLen = AndroidAgentSdk.buildSystemPrompt(
                         executor = executor,
@@ -681,8 +827,8 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                         commandDetail = ai.agentkernel.prompt.AgentSystemPrompt.CommandDetail.FULL,
                     )?.length ?: -1
                     appendLine("提示词长度：核心模式 $promptLen 字符 / 完整模式 $fullLen 字符" +
-                        "（服务 system 段上限 2000 → " +
-                        if (promptLen > 2000) "⚠️ 核心模式也会被截断！" else "核心模式装得下）")
+                        "（客户端 system 段上限 $segLimit → " +
+                        if (promptLen > segLimit) "⚠️ 核心模式也会被截断！" else "核心模式装得下）")
                 }.trim(),
                 elapsedMs = probeResults.sumOf { it.second.elapsedMs },
             )
@@ -690,10 +836,10 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 "CHECK",
                 "${if (promptOk) "✅" else "❌"} 提示词·命令清单与真机一致 | claimed=${claimed.size} " +
                     "missing=${missing.size} probe=${probeResults.size - probeFailed.size}/${probeResults.size} " +
-                    // 提示词有多长 —— 有的服务把客户端 system 段**截断到 2000 字符**，
-                    // 超了砍尾巴，而砍掉的正好是最后面的工作区规则。这个数字必须看得见。
-                    "| prompt=${systemPrompt.length} chars (service system cap=2000 → " +
-                    if (systemPrompt.length > 2000) "会被截断!)" else "装得下)",
+                    // 提示词有多长 —— 网关把客户端 system 段**截到上限**，超了砍尾巴，
+                    // 而砍掉的正好是最后面的工作区规则/长期记忆/会话摘要。这个数字必须看得见。
+                    "| prompt=${systemPrompt.length} chars (client system cap=$segLimit → " +
+                    if (systemPrompt.length > segLimit) "会被截断!)" else "装得下)",
             )
 
             // 8) 白名单只是「提示词里写什么」，**不是**「执行时限制什么」。
@@ -785,9 +931,10 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 executor = executor,
                 // ★ 系统提示词由 SDK 生成（环境 / 命令清单 / 能力边界 / 工作区规则），
                 //   这里不用手写 —— 手写的版本会跟实际注册的能力对不上。
-                // ★ 命令清单用 CORE：有些服务会把客户端 system 段硬截断到 2000 字符，
-                //   完整清单(2197)装不下、尾部会被砍掉；直连 DeepSeek 官方没有这个限制，
-                //   那边的默认值就是 FULL。
+                // ★ 命令清单用 CORE：网关的客户端 system 段上限是**可调参数**
+                //   （client_system_max_chars，默认 6000）。完整清单(2197)在 6000 下装得下，
+                //   但运营随时可能把上限调小 —— CORE 是「上限再小也不被砍尾巴」的安全值。
+                //   直连 DeepSeek 官方没有这个限制，那边可以用 SDK 的默认值 FULL。
                 // ★ 用 DemoState.commandDetail —— 和自检那份**同一个值**（否则自检在验另一份）。
                 commandDetail = commandDetail,
                 // ★ 思考强度：传**强度编码**（2 的幂，跨模型稳定）。
@@ -851,22 +998,37 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                     }
                 },
             )
-            // system 段预算体检：超了网关会**悄悄截断**，排在最后的工作区告警就丢了 ——
-            // 模型看不到那条告警，却没人知道。这种静默故障必须显式报出来。
+            // system 段预算体检：超了网关会**悄悄截断**，排在最后的记忆/摘要/告警就丢了 ——
+            // 模型看不到，却没人知道。这种静默故障必须显式报出来。
+            //
+            // ★ SDK 现在会**主动协调**：能砍的只有长期记忆 digest（它能用 agent-memory search 取回），
+            //   提示词/会话摘要/工作区告警一律不砍 ⇒ 正常情况下 over 恒为 false。
+            //   overflow 才是真问题：**把记忆砍光也装不下**（提示词本身太大，得改配置）。
             sdk.systemBudget().let { b ->
-                if (b.over) {
+                val detail = "prompt=${b.promptChars} 记忆=${b.memoryChars} 摘要=${b.summaryChars} 告警=${b.alertChars}"
+                if (b.overflow) {
                     log(
                         "CTX",
-                        "⚠️ system 段超限 prompt=${b.promptChars} alert=${b.alertChars} " +
-                            "合计=${b.totalChars} > ${b.limitChars}（网关会截断，告警可能到不了模型）",
+                        "⚠️ system 段装不下（砍光记忆也不够）$detail 合计=${b.totalChars} > ${b.limitChars}" +
+                            "—— 提示词本身太大，要改配置（换 CORE 清单 / 精简 extraNotes / 调大上限）",
                     )
                     chat += ChatLine.System(
-                        "system 段超限（${b.totalChars}/${b.limitChars} 字符）—— 网关会截断，工作区告警可能到不了模型。",
+                        "system 段装不下（${b.totalChars}/${b.limitChars} 字符）—— 把长期记忆砍光也超，" +
+                            "是提示词本身太大，需要改配置。",
+                    )
+                } else if (b.over) {
+                    log(
+                        "CTX",
+                        "⚠️ system 段超限 $detail 合计=${b.totalChars} > ${b.limitChars}（网关会截断，尾部到不了模型）",
+                    )
+                    chat += ChatLine.System(
+                        "system 段超限（${b.totalChars}/${b.limitChars} 字符）—— 网关会截断，尾部到不了模型。",
                     )
                 } else {
                     log(
                         "CTX",
-                        "system 段 ${b.totalChars}/${b.limitChars} 字符（prompt=${b.promptChars} alert=${b.alertChars}）",
+                        "system 段 ${b.totalChars}/${b.limitChars} 字符（$detail" +
+                            "，摘要预留位=${b.reservedSummaryChars}）",
                     )
                 }
             }
@@ -997,13 +1159,91 @@ class DemoState(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * 归档**分页**自检（自动化用）。
+     *
+     * 验前端「往上翻」那条路的三个性质：
+     * 1. **首屏只取最新一段**（不是一把全拉）；
+     * 2. **一次只多一段**（小段小段地加载，不跳段、不重复）；
+     * 3. **链对得上**：翻出来的每一段，`prevId`/`nextId` 都指着相邻那段。
+     *
+     * ★ 走的是**和滚动触发完全同一个函数** [loadOlderArchive] ——
+     *   所以验的是真逻辑，不是另写一套。
+     */
+    fun startArchivePagingCheck() {
+        DemoRuntime.startOncePerProcess("archivepaging") { runArchivePagingCheck() }
+    }
+
+    suspend fun runArchivePagingCheck() {
+        val store = archiveStore()
+        val total = store.size()
+        log("PAGE", "库里共 $total 段")
+        if (total < 2) {
+            log("PAGE", "❌ 只有 $total 段，验不了分页（至少要 2 段）")
+            return
+        }
+
+        fun item(title: String, ok: Boolean, detail: String) {
+            val verdict = if (ok) Verdict.PASS else Verdict.FAIL
+            log("PAGE", "${verdict.emoji} $title | $detail")
+            checks += CheckItem(title, detail, "(归档分页)", verdict, detail, 0)
+        }
+
+        // ① 首屏：只取最新一段
+        loadLatestArchive()
+        var waited = 0
+        while (archiveSegments.isEmpty() && waited < 100) {
+            delay(100); waited++
+        }
+        val first = archiveSegments.firstOrNull()
+        if (first == null) {
+            log("PAGE", "❌ 首屏没加载出来")
+            return
+        }
+        val newestId = store.list(limit = 1).firstOrNull()?.id
+        item("首屏只取最新的一段", archiveSegments.size == 1 && first.id == newestId,
+            "已加载 ${archiveSegments.size} 段 · 最新=${first.id} · 库里共 $total 段")
+
+        // ② 一直往上翻，直到翻完
+        val seen = mutableListOf(first.id)
+        val views = mutableListOf(first)
+        var guard = 0
+        while (archiveHasMore && guard < total + 5) {
+            val before = archiveSegments.size
+            loadOlderArchive()
+            waited = 0
+            while (archiveSegments.size == before && waited < 100) {
+                delay(100); waited++
+            }
+            val added = archiveSegments.lastOrNull() ?: break
+            if (added.id in seen) break
+            seen.add(added.id)
+            views.add(added)
+            guard++
+        }
+        item("一次只多一段、不跳段", seen.size == total,
+            "翻了 ${seen.size - 1} 次 · 共 $total 段 · 顺序=${seen.joinToString(" ← ")}")
+
+        item("不重复", seen.toSet().size == seen.size,
+            "去重后 ${seen.toSet().size} 段 / 共 ${seen.size} 段")
+
+        item("段链对得上", views.zipWithNext().all { (newer, older) ->
+                newer.prevId == older.id && older.nextId == newer.id
+            },
+            views.zipWithNext().map { (newer, older) -> "${newer.id}↔${older.id}" }.joinToString(" "))
+    }
+
+    /**
      * 记忆子系统的命令行自检（自动化用）。
      *
-     * 验四件事：
+     * 验八件事：
      * 1. **归档**：把一段历史总结成记忆 → 真的产出了一条条目；
      * 2. **落盘**：记忆正文在磁盘上（agent 用终端 `cat` 就能读）；
      * 3. **摘要块**：进提示词的那一块**带的是正文**，不是只有标题；
-     * 4. **压缩**：超预算的历史被压了一次 → 摘要产出、历史变短。
+     * 4. **压缩**：超预算的历史被压了一次 → 摘要产出、历史变短；
+     * 5. **历史变短**：压缩不是压了个寂寞；
+     * 6. **跨实例**：换个执行器实例记忆还在；
+     * 7. **归档段**：被摘要掉的**原文**落盘了（摘要不删原文，前端照样能翻）；
+     * 8. **段链**：段与段之间 prevId/nextId 连得上（前端顺着链往上翻）。
      *
      * ⚠️ 归档与压缩都**要真的调一次模型 API**，所以必须配好模型：
      * ```
@@ -1064,6 +1304,8 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 summaryTargetChars = 300,
                 idleArchiveMillis = 0,
             ),
+            // ★ 压缩掉的原文落归档（摘要不删原文）
+            archive = archiveStore(),
         )
         val big = (1..20).map { UserMessage("第$it 条消息 " + "x".repeat(60)) }
         val plan = probe.prepare(big, prefixChars = 0)
@@ -1086,7 +1328,27 @@ class DemoState(app: Application) : AndroidViewModel(app) {
         item("记忆跨实例保留", digest2 != null && entry != null && digest2.contains(entry.title),
             digest2?.let { "新实例摘要块 ${it.length} 字符" } ?: "新实例没有摘要块", 0)
 
+        // ⑦ 归档段：被摘要掉的原文**还在**（摘要不删原文）
+        val arch = archiveStore()
+        val segs = arch.list()
+        val compactSeg = segs.firstOrNull { it.kind == "compact" }
+        val readBack = compactSeg?.let { arch.read(it.id) }
+        item("压缩掉的原文落归档段",
+            readBack != null && readBack.messages.isNotEmpty(),
+            "归档段数=${segs.size} 压缩段原文条数=${readBack?.messages?.size ?: 0}", 0)
+
+        // ⑧ 段与段之间有链（前端顺着链往上翻）
+        //   方向要记清：**prevId = 更早的一段**、**nextId = 更晚的一段**。
+        //   segs 是「新的在前」，所以更新的那段 prevId 指向更老的那段。
+        val chained = segs.size >= 2 &&
+            segs[0].prevId == segs[1].id &&
+            segs[1].nextId == segs[0].id
+        item("归档段之间有链", chained,
+            segs.joinToString(" ← ") { "${it.kind}:${it.id}" } +
+                (if (chained) "" else " · 链断了"), 0)
+
         log("MEM", "记忆目录=${File(executor.layout.varDir, AndroidAgentSdk.MEMORY_DIR).absolutePath} 条目数=${store.list().size}")
+        log("MEM", "归档目录=${arch.rootDir().absolutePath} 段数=${segs.size}")
     }
 
     /**

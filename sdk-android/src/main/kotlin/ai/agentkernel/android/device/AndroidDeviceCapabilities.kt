@@ -3,6 +3,7 @@ package ai.agentkernel.android.device
 import ai.agentkernel.device.CapabilityFailure
 import ai.agentkernel.device.DeviceCapability
 import ai.agentkernel.device.okJson
+import ai.agentkernel.memory.AgentMemoryCapabilities
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -273,11 +274,15 @@ class BatteryCapability(private val context: Context) : DeviceCapability {
  *
  * @param workspace 工作区能力（`agent-*`）。不传就不注册 —— 宿主不需要工作区维护时别加。
  * @param http HTTP 调用能力（`agent-http-*`）。不传就不注册。
+ * @param memory 长期记忆能力（`agent-memory`）。不传就不注册。
+ *   ⚠️ **记忆开着才注册**：宿主没启用记忆（没传 `memoryPolicy`）的话，
+ *   agent 写进去的记忆没人读（不会进提示词），纯属白写。
  */
 fun defaultDeviceCapabilities(
     context: Context,
     workspace: AgentWorkspaceCapabilities? = null,
     http: AgentHttpCapabilities? = null,
+    memory: AgentMemoryCapabilities? = null,
 ): List<DeviceCapability> = buildList {
     // —— 与 Termux:API 逐字对齐的那批 ——
     add(TorchCapability(context))
@@ -289,4 +294,5 @@ fun defaultDeviceCapabilities(
     // —— SDK 自制的那批（`agent-` 前缀）——
     workspace?.let { addAll(it.capabilities) }
     http?.let { addAll(it.capabilities) }
+    memory?.let { addAll(it.capabilities) }
 }

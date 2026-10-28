@@ -7,6 +7,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -17,6 +18,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -24,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.FactCheck
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -49,6 +53,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -85,6 +90,12 @@ class MainActivity : ComponentActivity() {
         // 命令行触发记忆子系统自检（归档 / 落盘 / 摘要块 / 压缩）：
         //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_memory true
         val autorunMemory = intent?.getBooleanExtra("autorun_memory", false) ?: false
+        // 命令行直接进「归档」页（验前端能翻历史，不碰屏幕）：
+        //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_archive true
+        val autorunArchive = intent?.getBooleanExtra("autorun_archive", false) ?: false
+        // 命令行跑归档分页自检（首屏只取最新一段 / 一次只多一段 / 链对得上）：
+        //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_archive_paging true
+        val autorunArchivePaging = intent?.getBooleanExtra("autorun_archive_paging", false) ?: false
         // 网关配置也能从命令行注入（**运行时**的，token 不进 APK）：
         //   --es gateway_url ... --es gateway_token ... --es gateway_model ...
         // 思考强度用**强度编码**注入（2 的幂：1=关闭思考 2=low 4=medium 8=high 16=max）：
@@ -103,7 +114,7 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                DemoApp(state, autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory)
+                DemoApp(state, autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory, autorunArchive, autorunArchivePaging)
             }
         }
     }
@@ -119,15 +130,16 @@ fun DemoApp(
     autorunChatMulti: String? = null,
     autorunEfforts: Boolean = false,
     autorunMemory: Boolean = false,
+    autorunArchive: Boolean = false,
+    autorunArchivePaging: Boolean = false,
 ) {
     var tab by remember {
         mutableStateOf(
-            if (!autorunChat.isNullOrBlank() || !autorunChatMulti.isNullOrBlank()) {
-                2
-            } else if (autorunSelfCheck || autorunTorch || autorunMemory) {
-                1
-            } else {
-                0
+            when {
+                autorunArchive -> 3
+                !autorunChat.isNullOrBlank() || !autorunChatMulti.isNullOrBlank() -> 2
+                autorunSelfCheck || autorunTorch || autorunMemory -> 1
+                else -> 0
             },
         )
     }
@@ -156,6 +168,8 @@ fun DemoApp(
             state.startTorchCheck()
         } else if (autorunSelfCheck) {
             state.startSelfCheck()
+        } else if (autorunArchivePaging) {
+            state.startArchivePagingCheck()
         } else if (autorunMemory) {
             state.startMemoryCheck()
         } else if (!autorunChatMulti.isNullOrBlank()) {
@@ -192,13 +206,20 @@ fun DemoApp(
                     icon = { Icon(Icons.Filled.Chat, null) },
                     label = { Text("对话") },
                 )
+                NavigationBarItem(
+                    selected = tab == 3,
+                    onClick = { tab = 3 },
+                    icon = { Icon(Icons.Filled.History, null) },
+                    label = { Text("归档") },
+                )
             }
         },
     ) { padding ->
         when (tab) {
             0 -> CapabilitiesScreen(state, padding)
             1 -> SelfCheckScreen(state, padding)
-            else -> ChatScreen(state, padding)
+            2 -> ChatScreen(state, padding)
+            else -> ArchiveScreen(state, padding)
         }
     }
 }
@@ -692,6 +713,230 @@ fun ChatScreen(state: DemoState, padding: PaddingValues) {
         }
     }
 }
+
+// ---------------------------------------------------------------- 归档
+
+/** 归档页的一行：要么是「一段的标题条」，要么是「一条原始消息」，要么是「加载更早」。 */
+private sealed interface ArchiveRow {
+    data class Header(val segment: DemoState.ArchiveView) : ArchiveRow
+    data class Line(val line: DemoState.ArchiveLine) : ArchiveRow
+
+    /** 列表最上头的「还有更早的」占位条。 */
+    data object LoadMore : ArchiveRow
+}
+
+/**
+ * 归档历史 —— **摘要不删原文，前端照样能翻**。
+ *
+ * ## 首屏只看最新一段
+ *
+ * 进页面只取**最新的一段**（[DemoState.loadLatestArchive]）——
+ * 历史可能很长，整包拉进内存既慢又占地方。
+ * 顶头显示的是**最新一段的日期**。
+ *
+ * ## 往上滚才加载更早的
+ *
+ * 列表是**反向**的（`reverseLayout = true`）：底部是最新的一段，往上滚是更早的。
+ * 滚到已加载内容的最上边，就再取**一段**（不是一把全拉）。
+ *
+ * ★ **必须先滚过才加载**（`userScrolled`）：否则刚进页面就会把历史全拉下来 ——
+ *   那正好违背「首屏只取最新一段」。
+ */
+@Composable
+fun ArchiveScreen(state: DemoState, padding: PaddingValues) {
+    val listState = rememberLazyListState()
+
+    // 行序：**下标 0 = 列表最底下**。每段：先标题条，再把消息倒着排
+    //（倒序是为了「越往下 = 越新」，和反向列表的视觉方向一致）。
+    // 最上头再挂一条「还有更早的」占位条。
+    val rows = remember(state.archiveSegments.size, state.archiveHasMore) {
+        val base = state.archiveSegments.flatMap { seg ->
+            listOf(ArchiveRow.Header(seg)) + seg.lines.asReversed().map { ArchiveRow.Line(it) }
+        }
+        if (state.archiveHasMore) base + ArchiveRow.LoadMore else base
+    }
+
+    LaunchedEffect(Unit) { state.loadLatestArchive() }
+
+    /**
+     * 往上滚 → 加载更早的一段。
+     *
+     * ## 两个条件缺一不可
+     *
+     * 1. **最老的一段已经露头**（`maxIdx >= total - 1`）—— 滚到头了；
+     * 2. **滚动位置变过**（`pos != lastPos`）—— 用户真的滚了。
+     *
+     * ★ 第 2 条是**防「一把全拉」**的：
+     *   只看第 1 条的话，内容一屏放得下就会连锁触发
+     *   （加载一段 → 又露头 → 再加载……），最后**一次把历史全拉下来** ——
+     *   那正好违背「小段小段地加载」。
+     *   而位置不变（用户没动）就不触发 ⇒ 一次只前进一段。
+     *
+     * ⚠️ `isScrollInProgress` **不能**单独当「用户滚了」的判据 ——
+     *   反向列表的初始布局也会让它短暂为真，于是**刚进页面就自动加载**了下一段。
+     */
+    var lastPos by remember { mutableStateOf(-1L) }
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            // 行数（含最上头那条「还有更早的」占位条）
+            val total = state.archiveSegments.sumOf { 1 + it.lines.size } +
+                (if (state.archiveHasMore) 1 else 0)
+            val visible = listState.layoutInfo.visibleItemsInfo
+            val maxIdx = visible.maxOfOrNull { it.index } ?: 0
+            val pos = listState.firstVisibleItemIndex.toLong() * 1_000_000L +
+                listState.firstVisibleItemScrollOffset
+            // 四个数打包：内容条数 / 最老的露没露头 / 滚动位置 / 布局有没有行
+            listOf(total.toLong(), maxIdx.toLong(), pos, visible.size.toLong())
+        }.collect { snap ->
+            val total = snap[0].toInt()
+            val maxIdx = snap[1].toInt()
+            val pos = snap[2]
+            val visibleCount = snap[3].toInt()
+            if (visibleCount == 0) return@collect          // 还没布局出来
+            if (lastPos < 0) {
+                lastPos = pos          // 第一次只做定位，不触发
+            } else if (pos != lastPos && maxIdx >= total - 1) {
+                lastPos = pos
+                state.loadOlderArchive()
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        val latest = state.archiveSegments.firstOrNull()
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("归档历史", fontWeight = FontWeight.Bold)
+                Text(
+                    if (latest == null) {
+                        "还没有归档段"
+                    } else {
+                        "最新一段：${formatArchiveTime(latest.createdAt)}" +
+                            " · 已加载 ${state.archiveSegments.size} 段"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = { state.loadLatestArchive() }) { Text("刷新") }
+        }
+
+        Text(
+            "对话被压缩后，原文会落成一段归档 —— 这里照常能翻。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        if (rows.isEmpty()) {
+            Text(
+                "暂无归档。跑一轮长对话触发压缩后，回这里就能看到被摘要掉的那一段。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        LazyColumn(
+            state = listState,
+            reverseLayout = true,
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            items(rows.size) { i ->
+                when (val row = rows[i]) {
+                    is ArchiveRow.Header -> ArchiveSegmentHeader(row.segment)
+                    is ArchiveRow.Line -> ChatBubble(row.line.who, row.line.text, primary = row.line.who == "你")
+                    is ArchiveRow.LoadMore -> ArchiveLoadMore(state)
+                }
+            }
+        }
+
+        Text(
+            when {
+                state.archiveLoading -> "正在加载更早的一段…"
+                state.archiveHasMore -> "↑ 往上滚，加载更早的一段"
+                state.archiveSegments.isEmpty() -> ""
+                else -> "已经到最早的一段了"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * 列表最上头的「还有更早的」占位条。
+ *
+ * ★ **为什么要点一下也能加载**：
+ *   已加载的内容**一屏放得下**的时候，列表根本滚不动 ——
+ *   只靠「滚到顶就自动加载」的话，更早的那几段**永远出不来**。
+ *   所以这里给一个可点的入口：滚得动就自动加载，滚不动就点它。
+ */
+@Composable
+private fun ArchiveLoadMore(state: DemoState) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !state.archiveLoading) { state.loadOlderArchive() },
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Text(
+                if (state.archiveLoading) "正在加载更早的一段…" else "↑ 还有更早的（点一下加载）",
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+            )
+            Text(
+                "往上滚到这条就会自动加载；一次只取一段",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** 一段归档的标题条：日期、类型、标题，以及段与段之间的链接。 */
+@Composable
+private fun ArchiveSegmentHeader(segment: DemoState.ArchiveView) {
+    Surface(
+        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Text(
+                formatArchiveTime(segment.createdAt) +
+                    " · " + if (segment.kind == "idle") "闲置归档" else "压缩归档",
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+            )
+            if (segment.title.isNotBlank()) {
+                Text(segment.title, style = MaterialTheme.typography.bodySmall)
+            }
+            // 段与段的链接：往前一段 / 后一段
+            Text(
+                buildString {
+                    append("段 id ").append(segment.id)
+                    append(" · 更早：").append(segment.prevId ?: "（无）")
+                    append(" · 更晚：").append(segment.nextId ?: "（无）")
+                },
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+private fun formatArchiveTime(millis: Long): String =
+    java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+        .format(java.util.Date(millis))
 
 @Composable
 private fun ChatBubble(who: String, text: String, primary: Boolean, warn: Boolean = false) {

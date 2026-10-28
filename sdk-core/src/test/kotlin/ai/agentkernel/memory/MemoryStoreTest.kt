@@ -91,6 +91,71 @@ class MemoryStoreTest {
         assertTrue(a.id != b.id, "id 必须唯一，实际都是 ${a.id}")
         assertEquals(2, store.list().size)
     }
+
+    // ---- 改 / 删 / 搜（agent 自己动手的那部分）----
+
+    @Test
+    fun `改正文后能读回新内容且标题跟着更新`() {
+        val store = MemoryStore(tempDir())
+        store.append(MemoryEntry("20261028-1000", 1_000L, "旧标题", "旧正文第一行\n旧正文第二行"))
+
+        val edited = store.edit("20261028-1000", "新正文第一行\n新正文第二行")
+        assertNotNull(edited)
+        assertEquals("新正文第一行\n新正文第二行", store.readBody("20261028-1000"))
+        assertEquals("新正文第一行", edited.title, "标题要跟着新正文的第一行走")
+        assertEquals("新正文第一行", store.list().first().title, "索引里的标题也要更新")
+        assertEquals(1_000L, store.list().first().createdAt, "改内容不该改创建时间")
+    }
+
+    @Test
+    fun `改不存在的 id 返回 null`() {
+        val store = MemoryStore(tempDir())
+        assertNull(store.edit("不存在的id", "随便写点什么"))
+        assertEquals(0, store.list().size)
+    }
+
+    @Test
+    fun `删掉之后列表里没有它且读不到正文`() {
+        val store = MemoryStore(tempDir())
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "用户在配网关"))
+        store.append(MemoryEntry("20261028-1100", 2_000L, "改提示词", "提示词要瘦身"))
+
+        assertTrue(store.delete("20261028-1000"))
+        assertNull(store.readBody("20261028-1000"))
+        assertEquals(listOf("改提示词"), store.list().map { it.title })
+    }
+
+    @Test
+    fun `删不存在的 id 返回 false`() {
+        val store = MemoryStore(tempDir())
+        assertTrue(!store.delete("不存在的id"))
+    }
+
+    @Test
+    fun `按关键词搜标题和正文且不区分大小写`() {
+        val store = MemoryStore(tempDir())
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "用户在配 Gateway，端口 8080"))
+        store.append(MemoryEntry("20261028-1100", 2_000L, "改提示词", "提示词要瘦身"))
+
+        // 标题命中
+        assertEquals(listOf("20261028-1100"), store.search("改提示").map { it.id })
+        // 正文命中，且不区分大小写
+        assertEquals(listOf("20261028-1000"), store.search("GATEWAY").map { it.id })
+        assertEquals(listOf("20261028-1000"), store.search("8080").map { it.id })
+        // 搜不到就是空
+        assertEquals(0, store.search("根本没有这个词").size)
+    }
+
+    @Test
+    fun `搜出来的结果按时间倒序`() {
+        val store = MemoryStore(tempDir())
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "网关在 8080"))
+        store.append(MemoryEntry("20261028-1100", 2_000L, "换网关", "网关搬到 9090"))
+
+        val hits = store.search("网关")
+        assertEquals(2, hits.size)
+        assertEquals("换网关", hits.first().title, "新的在前")
+    }
 }
 
 /** 假模型客户端：只回一句固定的摘要，并记录收到的请求。 */

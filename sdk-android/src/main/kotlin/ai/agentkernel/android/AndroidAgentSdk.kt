@@ -2,6 +2,7 @@ package ai.agentkernel.android
 
 import ai.agentkernel.android.shizuku.NoopShizukuBridge
 import ai.agentkernel.android.shizuku.ShizukuBridge
+import ai.agentkernel.archive.ArchiveStore
 import ai.agentkernel.context.ContextInspector
 import ai.agentkernel.device.DeviceCapabilityRegistry
 import ai.agentkernel.kernel.AgentKernel
@@ -9,6 +10,7 @@ import ai.agentkernel.kernel.KernelEvent
 import ai.agentkernel.kernel.TurnResult
 import ai.agentkernel.llm.LlmClient
 import ai.agentkernel.llm.openai.ChatCompletionsClient
+import ai.agentkernel.memory.AgentMemoryCapabilities
 import ai.agentkernel.memory.ContextMemory
 import ai.agentkernel.memory.ContextPolicy
 import ai.agentkernel.memory.MemoryStore
@@ -122,13 +124,21 @@ class AndroidAgentSdk(
      */
     private val reasoningStrength: Int? = null,
     /**
-     * 客户端 system 段的长度上限（**只用于体检**，不参与截断）。
+     * 客户端 system 段的**字符上限**（**参与协调**，不只是体检）。
      *
-     * 实测：有些服务会把客户端 system 段**硬截到 2000 字符**，超了悄悄砍尾巴 ——
-     * 砍掉的正好是排在最后的那段（工作区告警就排在那儿）。
+     * 实测：有些网关会把客户端 system 段**硬截到固定长度**，超了**悄悄砍尾巴** ——
+     * 砍掉的正好是排在最后的那几段（工作区告警、会话摘要就排在那儿）。
      * 直连 DeepSeek 官方没这个上限 → 传 null。
+     *
+     * ⚠️ **超了不会报错，只会被截**。所以本门面**主动协调**：
+     * 砍得动的只有**长期记忆 digest**（它可以用 `agent-memory search` 取回来），
+     * 而提示词 / 会话摘要 / 工作区告警**一律不砍** ——
+     * 砍了那叫「模型看不见」，不是「少带点」。
+     * 连不可砍的部分都超了 ⇒ 走 [SystemBudget.overflow] **报出来**，不再静默。
+     *
+     * 默认 6000（与我们网关的默认上限一致）；换网关就按它的**实际上限**传。
      */
-    private val systemBudgetLimitChars: Int? = 2000,
+    private val systemBudgetLimitChars: Int? = DEFAULT_SYSTEM_BUDGET_LIMIT_CHARS,
     /**
      * 上下文体检器（比对「这一轮发出去的」和「上一轮发出去的」）。
      *
@@ -190,6 +200,7 @@ class AndroidAgentSdk(
             model = model,
             store = MemoryStore(File(layout.varDir, MEMORY_DIR)),
             policy = policy,
+            archive = ArchiveStore(File(layout.varDir, ARCHIVE_DIR)),
         )
     }
 
@@ -256,20 +267,44 @@ class AndroidAgentSdk(
     suspend fun runTurn(messages: List<ChatMessage>): TurnResult {
         // ★ 稳定前缀的**顺序是固定的**：提示词 → 长期记忆 → 会话摘要 → 工作区告警。
         //   顺序一变 = 前缀变了 = 缓存全废。
-        val prompt = resolveSystemPrompt()
-        val digest = memory?.digest()
+        //
+        // ★ 先**协调字符预算**（唯一能砍的是长期记忆 digest），再拼前缀 ——
+        //   协调必须在 prepare() **之前**做：压缩请求要**逐字重放**同一个前缀，
+        //   digest 一旦两处不一样，压缩那次调用就吃不到上游缓存。
+        val parts = coordinatePrefix()
+        val prompt = parts.prompt
+        val digest = parts.digest
+        val priorSummary = parts.priorSummary
+        val alert = parts.alert
+
+        // 压缩请求要**逐字重放**的稳定前缀：和主请求的稳定前缀同源、同样顺序。
+        //   上一轮摘要在里面 —— 压缩时它原样重放，就不用再往 user 消息里塞一份。
+        val replayPrefix = ArrayList<ChatMessage>(4)
+        prompt?.let { replayPrefix += SystemMessage(it) }
+        digest?.let { replayPrefix += SystemMessage(it) }
+        priorSummary?.let { replayPrefix += SystemMessage(SUMMARY_HEADER + it) }
+        alert?.let { replayPrefix += SystemMessage(it) }
+
         // 已经知道的前缀长度（用来判断这次要不要压）。
-        val knownChars = (prompt?.length ?: 0) + (digest?.length ?: 0) +
-            (memory?.sessionSummary()?.length ?: 0)
+        // ⚠️ 告警、摘要标题、**摘要预留位**都**要算进去** —— 少了它们就低估了前缀，
+        //    于是「其实超容量了」被算成「没超」，该压的时候不压。
+        val knownChars = parts.plannedChars
 
         // 超容量就在这里**压一次**；闲置到点就在这里**归档成记忆**（然后开新会话）。
-        val plan = memory?.prepare(messages, prefixChars = knownChars)
+        // 压缩请求必须带上**与主请求逐字相同**的工具定义，否则那次调用不吃缓存。
+        val plan = memory?.prepare(
+            history = messages,
+            prefixChars = knownChars,
+            replayPrefix = replayPrefix,
+            tools = tools.schemas(),
+        )
 
+        // ★ 这里拼的才是**真正要发出去**的前缀，顺序同上（摘要换成 plan.summary）。
         val prefix = ArrayList<ChatMessage>(5)
         prompt?.let { prefix += SystemMessage(it) }
         digest?.let { prefix += SystemMessage(it) }
         plan?.summary?.let { prefix += SystemMessage(SUMMARY_HEADER + it) }
-        workspaceGuard?.alert()?.let { prefix += SystemMessage(it) }
+        alert?.let { prefix += SystemMessage(it) }
 
         // plan.history 可能已经压缩过 / 归档过。
         // 宿主把 result.messages 存回去，存的就是**压缩后**的那份 —— 历史不会越滚越大。
@@ -289,21 +324,170 @@ class AndroidAgentSdk(
     fun memory(): ContextMemory? = memory
 
     /**
-     * 客户端 system 段的**长度体检**。
+     * 会话**归档**仓库（null = 没启用记忆 ⇒ 不会有归档）。
      *
-     * 网关会把客户端 system 段**截到 2000 字符**（实测），超了**悄悄砍尾巴**。
-     * 系统提示词本来就占了大半，再加一条告警就可能超 ——
-     * 超了等于**告警根本到不了模型**（模型看不到那条告警，却没人知道）。
+     * 摘要**不删原文** —— 被摘要掉的那一段落成一段归档，段与段之间有链。
+     * 前端照常显示历史，就是靠它：
+     *
+     * ```
+     * // 首屏：最新的一段
+     * val first = store.list(limit = 1)
+     * // 往上滚：游标传当前最早那段，只取更早的一段
+     * val older = store.list(limit = 1, before = first.last().id)
+     * ```
+     *
+     * 宿主也可以自己开一个（见 [archiveStore]）—— 路径一样，读的是同一份文件。
+     */
+    fun archive(): ArchiveStore? = memory?.archiveStore()
+
+    /**
+     * 客户端 system 段的**长度体检**（数字与 [runTurn] 实际发出的**同一份**）。
+     *
+     * 网关会把客户端 system 段**截到固定长度**（实测），超了**悄悄砍尾巴**。
+     * 系统提示词本来就占了大半，再加一条告警、摘要、记忆就可能超 ——
+     * 超了等于**那几段根本到不了模型**（模型看不见，却没人知道）。
      * 这个数必须看得见。
      *
-     * @param limitChars 网关的 system 段上限；null = 不检查。
+     * ## 三种状态
+     *
+     * | 字段 | 含义 |
+     * |---|---|
+     * | [SystemBudget.totalChars] | 这一轮**实际**会发出去多少字符 |
+     * | [SystemBudget.over] | 实际超了 ⇒ 网关会截（要处理） |
+     * | [SystemBudget.overflow] | **把记忆砍光也装不下** ⇒ 提示词本身太大（要改配置） |
+     *
+     * @param limitChars 网关的 system 段上限；null = 不检查（直连官方 API）。
      */
     fun systemBudget(limitChars: Int? = systemBudgetLimitChars): SystemBudget {
-        val promptChars = resolveSystemPrompt()?.length ?: 0
-        val alertChars = workspaceGuard?.alert()?.length ?: 0
-        // 网关把多条 system 段用空行拼起来，所以分隔符也占地方。
-        val total = promptChars + alertChars + if (alertChars > 0) 2 else 0
-        return SystemBudget(promptChars, alertChars, total, limitChars)
+        val parts = coordinatePrefix(limitChars)
+        return SystemBudget(
+            promptChars = parts.promptChars,
+            alertChars = parts.alertChars,
+            totalChars = parts.totalChars,
+            limitChars = limitChars,
+            memoryChars = parts.digestChars,
+            summaryChars = parts.summaryChars,
+            reservedSummaryChars = parts.summaryReserve,
+        )
+    }
+
+    /**
+     * 协调这一轮稳定前缀的**字符预算**。
+     *
+     * 客户端 system 段有上限，而超限的代价是**静默截断** ——
+     * 排在最后的那几段（工作区告警、会话摘要、长期记忆）直接消失，模型看不见。
+     * 所以必须在**发出去之前**把总长压回上限内，而不是发出去让人截。
+     *
+     * ## 砍谁
+     *
+     * | 部分 | 能砍吗 | 为什么 |
+     * |---|---|---|
+     * | 设备提示词 | ❌ | 砍了模型不知道自己是谁、能干什么 |
+     * | 会话摘要 | ❌ | 它是压缩的产物，砍了 = 丢历史 |
+     * | 工作区告警 | ❌ | 砍了模型看不到「该清工作区」 |
+     * | 长期记忆 digest | ✅ | **可以用 `agent-memory search` 取回** —— 砍掉只是这一轮少带点 |
+     *
+     * ⇒ **优先砍记忆 digest**：它是唯一可再生的部分。
+     *
+     * ## 为什么摘要要「**预留**」而不是按现有长度算
+     *
+     * 摘要**什么时候出现**不由我们决定（压缩触发与否取决于历史长度），
+     * 而 digest 的截断必须在 `prepare()` **之前**定下来 ——
+     * 否则重放前缀（压缩请求用）与最终前缀（主请求用）里的 digest 不一样，
+     * **压缩那次调用就吃不到上游缓存**。
+     *
+     * ⇒ 只能按 [ContextPolicy.summaryTargetChars] **保守预留**一个摘要位。
+     * 这不会浪费预算：预留只在「本来就不够装摘要」时才起作用，
+     * 而那种情况下不预留就一定超限。
+     */
+    private fun coordinatePrefix(limitChars: Int? = systemBudgetLimitChars): PrefixParts {
+        val prompt = resolveSystemPrompt()
+        val alert = workspaceGuard?.alert()
+        val mem = memory
+        val priorSummary = mem?.sessionSummary()
+
+        // 摘要位：
+        //   · 已经有摘要 ⇒ 按它算（取「实际长度」与「目标长度」的**较大者**，
+        //     因为下一轮压缩出来的新摘要可能比旧的长）；
+        //   · 还没有摘要但压缩开着 ⇒ 保守预留一个目标长度的位；
+        //   · 记忆没启用 / 压缩关着 ⇒ 不预留（不可能凭空多出摘要）。
+        val summaryReserve = when {
+            mem == null -> 0
+            priorSummary != null ->
+                SUMMARY_HEADER.length + maxOf(priorSummary.length, mem.policy.summaryTargetChars)
+            mem.policy.compressionEnabled -> SUMMARY_HEADER.length + mem.policy.summaryTargetChars
+            else -> 0
+        }
+
+        // 分隔符：网关把多条 system 段用**空行**拼起来，空行也占 2 个字符。
+        val plannedSegments =
+            (if (prompt != null) 1 else 0) +
+                (if (mem != null) 1 else 0) + // 假设记忆会在（预算不够时它会被砍掉）
+                (if (summaryReserve > 0) 1 else 0) +
+                (if (alert != null) 1 else 0)
+        val separatorChars = if (plannedSegments > 0) (plannedSegments - 1) * 2 else 0
+
+        val fixedChars = (prompt?.length ?: 0) + summaryReserve + (alert?.length ?: 0) + separatorChars
+
+        // 记忆能拿多少：剩下的全是它的，但**它自己也有上限**（policy.memoryDigestChars）。
+        val digestBudget = when {
+            mem == null -> 0
+            limitChars == null -> mem.policy.memoryDigestChars
+            else -> (limitChars - fixedChars)
+                .coerceAtLeast(0)
+                .coerceAtMost(mem.policy.memoryDigestChars)
+        }
+
+        return PrefixParts(
+            prompt = prompt,
+            digest = mem?.digest(digestBudget),
+            priorSummary = priorSummary,
+            alert = alert,
+            summaryReserve = summaryReserve,
+        )
+    }
+
+    /**
+     * 本轮稳定前缀的各部分（**协调后**的最终形态）。
+     *
+     * 内部记账用 —— 宿主要看数字走 [systemBudget]。
+     */
+    private data class PrefixParts(
+        val prompt: String?,
+        val digest: String?,
+        val priorSummary: String?,
+        val alert: String?,
+        /** 协调时为「会话摘要」预留的字符数（标题 + 摘要正文）。 */
+        val summaryReserve: Int,
+    ) {
+        val promptChars: Int get() = prompt?.length ?: 0
+        val digestChars: Int get() = digest?.length ?: 0
+        val summaryChars: Int get() = priorSummary?.let { SUMMARY_HEADER.length + it.length } ?: 0
+        val alertChars: Int get() = alert?.length ?: 0
+
+        /** 这一轮**实际**会发出去的总字符数（含分段之间的空行）。 */
+        val totalChars: Int get() = joinChars(promptChars, digestChars, summaryChars, alertChars)
+
+        /**
+         * 协调后的「保证值」：摘要按**预留位**算。
+         *
+         * 用它去判「会不会超限」才准 —— 因为摘要可能这一轮才出现。
+         */
+        val plannedChars: Int
+            get() = joinChars(promptChars, digestChars, summaryReserve, alertChars)
+
+        private companion object {
+            /**
+             * 多段 system 拼起来的总字符数。
+             *
+             * 网关用**空行**拼 system 段 ⇒ 每多一段就多 2 个字符。
+             */
+            fun joinChars(vararg lens: Int): Int {
+                val kept = lens.filter { it > 0 }
+                if (kept.isEmpty()) return 0
+                return kept.sum() + (kept.size - 1) * 2
+            }
+        }
     }
 
     /** 最终生效的系统提示词；`""` 表示不加。 */
@@ -321,6 +505,62 @@ class AndroidAgentSdk(
     companion object {
         /** 记忆在 agent 私有根下的目录名（`<filesDir>/agent/var/memory/`）。 */
         const val MEMORY_DIR = "memory"
+
+        /**
+         * 客户端 system 段的**默认**字符上限。
+         *
+         * 与我们网关的 `client_system_max_chars` 默认值一致（6000）。
+         *
+         * ★ **别再改回 2000**：真机设备提示词本身就占 1883 字符，老值 2000 会把
+         * 长期记忆 digest / 会话摘要 / 工作区告警**全砍掉** ——
+         * 而网关不报错（只是悄悄砍尾巴）⇒ agent 写了记忆、模型压根没看见。
+         *
+         * 网关那一侧的值是**可调参数**（后端 AI 用 `ai_gateway_set` 改，3 秒生效）。
+         * 换网关就按它的**实际上限**传 [AndroidAgentSdk.systemBudgetLimitChars]。
+         */
+        const val DEFAULT_SYSTEM_BUDGET_LIMIT_CHARS = 6000
+
+        /** 会话归档在 agent 私有根下的目录名（`<filesDir>/agent/var/archive/`）。 */
+        const val ARCHIVE_DIR = "archive"
+
+        /**
+         * 打开会话归档仓库（`<filesDir>/agent/var/archive/`）。
+         *
+         * 宿主/前端自己开一个，用来翻历史 —— 和 SDK 内部写的**是同一份文件**
+         * （路径由同一个常量算出来，不会各写各的）。
+         *
+         * ```
+         * val store = AndroidAgentSdk.archiveStore(context)
+         * val latest = store.list(limit = 1).firstOrNull()
+         * ```
+         */
+        fun archiveStore(context: Context): ArchiveStore =
+            ArchiveStore(File(PrefixLayout(context.filesDir.path).varDir, ARCHIVE_DIR))
+
+        /**
+         * 长期记忆命令（`agent-memory`）—— 宿主组装能力表时用这个。
+         *
+         * 为什么给工厂、而不是让宿主自己拼路径：记忆目录**必须**和 SDK 内部那份
+         * [ContextMemory] 用的是同一个（`<filesDir>/agent/var/memory/`）。
+         * 宿主自己拼 `PrefixLayout(...)` 的话，一旦改了 agent 根目录名就对不上 ——
+         * 对不上的后果是「agent 写进 A 目录、SDK 从 B 目录读」，
+         * 表现成「明明写了记忆，却一条都不进提示词」，极难查。
+         *
+         * ```
+         * val caps = DeviceCapabilityRegistry(
+         *     defaultDeviceCapabilities(context) +
+         *         AndroidAgentSdk.memoryCapabilities(context).capabilities
+         * )
+         * ```
+         *
+         * ⚠️ 记忆能力**只在宿主启用了记忆（`memoryPolicy`）时才有意义**：
+         * 宿主没启用记忆的话，agent 写进去的记忆没人读（不会进提示词），
+         * 纯属白写。所以别无条件注册。
+         */
+        fun memoryCapabilities(context: Context): AgentMemoryCapabilities =
+            AgentMemoryCapabilities(
+                MemoryStore(File(PrefixLayout(context.filesDir.path).varDir, MEMORY_DIR))
+            )
 
         /** 会话摘要进前缀时的标题。 */
         private const val SUMMARY_HEADER = "## 之前的对话摘要（压缩后的历史）\n"
@@ -426,22 +666,54 @@ class AndroidAgentSdk(
 /**
  * 客户端 system 段的**长度体检**（见 [AndroidAgentSdk.systemBudget]）。
  *
- * 超了不会报错 —— 只会被网关**悄悄截断**，而截掉的那段（工作区告警）模型就再也看不到了。
- * 所以这个数必须**看得见**，别让它变成一个没人发现的静默故障。
+ * 超了不会报错 —— 只会被网关**悄悄截断**，而截掉的那段（工作区告警、会话摘要、
+ * 长期记忆）模型就再也看不到了。所以这个数必须**看得见**，
+ * 别让它变成一个没人发现的静默故障。
+ *
+ * @param promptChars 系统提示词的字符数。
+ * @param alertChars 工作区告警的字符数（没有告警时为 0）。
+ * @param totalChars 这一轮**实际**会发出去的总字符数（含分段之间的空行）。
+ * @param limitChars 网关的 system 段上限；null = 不知道上限（直连官方 API）。
+ * @param memoryChars 长期记忆 digest 的字符数（协调后实际带上的）。
+ * @param summaryChars 会话摘要（标题 + 正文）的字符数。
+ * @param reservedSummaryChars 协调时为「会话摘要」**预留**的字符数
+ *   （摘要可能这一轮才出现，所以要提前留位）。
  */
 data class SystemBudget(
-    /** 系统提示词的字符数。 */
     val promptChars: Int,
-    /** 工作区告警的字符数（没有告警时为 0）。 */
     val alertChars: Int,
-    /** 两条拼起来（算上分隔用的空行）的总字符数。 */
     val totalChars: Int,
-    /** 网关的 system 段上限；null = 不知道上限（直连官方 API）。 */
     val limitChars: Int?,
+    /** 长期记忆 digest 的字符数（协调后实际带上的）。 */
+    val memoryChars: Int = 0,
+    /** 会话摘要（标题 + 正文）的字符数。 */
+    val summaryChars: Int = 0,
+    /** 协调时为「会话摘要」预留的字符数（摘要可能这一轮才出现，所以要提前留位）。 */
+    val reservedSummaryChars: Int = 0,
 ) {
-    /** 是否会超限。 */
+    /** 是否会超限（按**实际**发出的字符数算）。 */
     val over: Boolean get() = limitChars != null && totalChars > limitChars
 
     /** 还剩多少字符（null = 不知道上限）。 */
     val remainingChars: Int? get() = limitChars?.let { it - totalChars }
+
+    /**
+     * **把长期记忆砍光也装不下**吗？
+     *
+     * true = 提示词 / 摘要 / 告警这三样加起来就超了 ——
+     * 这不是「记忆太多」，是**提示词本身太大**，要改配置（换 `commandDetail`、
+     * 精简 `extraNotes`、或把上限调大）。
+     *
+     * ⚠️ 与 [over] 的区别：[over] 可能只是记忆挤掉了（SDK 已经优先砍它）；
+     * [overflow] 是**砍完还超** —— 这时候得有人动手改配置。
+     */
+    val overflow: Boolean get() = limitChars != null && (totalChars - memoryChars) > limitChars
+
+    /**
+     * 协调后的**保证值**：摘要按预留位算。
+     *
+     * 判「会不会超限」用这个更准 —— 摘要可能这一轮才出现，
+     * 按实际长度算会低估。
+     */
+    val plannedChars: Int get() = totalChars - summaryChars + reservedSummaryChars
 }

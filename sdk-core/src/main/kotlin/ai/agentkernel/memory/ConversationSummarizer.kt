@@ -1,15 +1,34 @@
 package ai.agentkernel.memory
 
 import ai.agentkernel.llm.LlmClient
-import ai.agentkernel.protocol.AssistantMessage
 import ai.agentkernel.protocol.ChatMessage
 import ai.agentkernel.protocol.ChatRequest
-import ai.agentkernel.protocol.SystemMessage
-import ai.agentkernel.protocol.ToolMessage
 import ai.agentkernel.protocol.UserMessage
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * 把一段对话**压成一段稳定摘要** —— 靠真的调一次模型 API。
+ *
+ * ## 压缩请求怎么发（dsh `compaction-basic/summarizer.ts` 的做法）
+ *
+ * ```
+ * 稳定前缀（逐字重放） + 被遮蔽区（原样） + 一条 user 压缩指令
+ * ```
+ *
+ * 三个要点，缺一个就白压：
+ *
+ * 1. **被遮蔽区原样进请求**（不 render 成文本）。
+ *    把消息渲染成一段「[用户] …」的文本，等于告诉模型「这是转述，不是原话」——
+ *    内容细节被改写，摘要质量下降；而逐字重放的话，**上游前缀缓存能命中**
+ *    （这一段和主请求里的那段是**同样的字节**）。
+ * 2. **工具定义与主请求逐字一致**（`tools` 原样带上）。
+ *    ⚠️ 送 `emptyList()` 的话，网关拼出来的请求体和主请求**不是同一串字节**，
+ *    压缩这次调用就**不吃缓存**；工具段一变，缓存从那儿起全部作废。
+ * 3. **压缩指令是最后一条 user message**。
+ *    指令放最前面的话，它会顶在稳定前缀的最外侧 —— 每次压缩的指令只要差一个字，
+ *    后面整段前缀就全废了。放最后，它只影响这条请求的尾巴。
  *
  * ## 为什么摘要要「稳定」
  *
@@ -39,36 +58,37 @@ class ConversationSummarizer(
     /**
      * 压一次。
      *
-     * @param messages 要压缩的对话（旧的那些）。
+     * @param messages **被遮蔽区**（旧的那些）—— 原样进请求，不渲染成文本。
      * @param targetChars 摘要的目标长度（写进提示词当软约束）。
-     * @param previousSummary 上一次压缩产出的摘要（如果有）。
-     *   **它会一起参与压缩** —— 否则第二次压缩会把第一次压掉的内容彻底丢掉。
+     * @param replayPrefix 要逐字重放的稳定前缀（system 段）。
+     *   上一轮摘要在主请求里本来就是一个 system 段，**由它带进来**，
+     *   不要再往 user 消息里塞一份 —— 那会变成「同一段内容出现两遍」，
+     *   而且指令字符串一变，前缀就断了。
+     * @param tools 与主请求**完全相同**的工具定义，原样带上（否则这次调用不吃缓存）。
+     * @param sessionId 会话标识；能拿到就带（服务端据此复核前缀缓存还剩多少）。
      * @return 摘要正文；失败时返回 null（调用方要能容忍压缩失败）。
      */
     suspend fun summarize(
         messages: List<ChatMessage>,
         targetChars: Int,
-        previousSummary: String? = null,
+        replayPrefix: List<ChatMessage> = emptyList(),
+        tools: List<JsonObject> = emptyList(),
+        sessionId: String? = null,
     ): String? {
-        if (messages.isEmpty() && previousSummary.isNullOrBlank()) return null
-
-        val instruction = SystemMessage(buildInstruction(targetChars))
-        val body = buildString {
-            if (!previousSummary.isNullOrBlank()) {
-                appendLine("【已有的摘要】")
-                appendLine(previousSummary.trim())
-                appendLine()
-            }
-            appendLine("【要压缩的对话】")
-            append(render(messages))
-        }
+        if (messages.isEmpty()) return null
 
         val request = ChatRequest(
             model = model,
-            messages = listOf(instruction, UserMessage(body)),
-            tools = emptyList(),           // 摘要不需要工具
+            // 顺序不能改：前缀 → 被遮蔽区 → 指令（指令必须是最后一条）。
+            messages = replayPrefix + messages + listOf(UserMessage(buildInstruction(targetChars))),
+            // ⚠️ 必须与主请求逐字一致，否则压缩这次调用不吃缓存。
+            tools = tools,
             temperature = temperature,
             maxTokens = maxTokens,
+            // 网关据此识别压缩请求，并用后端提示词库里的正文替换这条指令；
+            // 直连 DeepSeek 时该字段被忽略（官方会忽略未知字段）。
+            extra = buildJsonObject { put("compact", true) },
+            sessionId = sessionId,
         )
         return runCatching { llm.complete(request) }
             .getOrNull()
@@ -76,14 +96,23 @@ class ConversationSummarizer(
             ?.takeIf { it.isNotEmpty() }
     }
 
+    /**
+     * 本地兜底的压缩指令。
+     *
+     * 写死在 SDK 里，保证「没有后端提示词库」时也能工作（直连 DeepSeek 就是这种情况）。
+     *
+     * ⚠️ 同一 targetChars 下这段字符串必须**逐字相同** ——
+     * 它会进请求，差一个字就多一次缓存失效。所以它只是「一个模板 + 一个数字」，
+     * 里面不许有时间戳、随机数、UUID 之类会变的东西。
+     */
     private fun buildInstruction(targetChars: Int): String = """
-        你在把一段对话压成**稳定的摘要**。
+        请把上面这段对话压缩成一段**稳定的摘要**。
 
-        这份摘要之后会作为「历史」的替身，放在每次请求的最前面。
+        这份摘要之后会代替原始对话，放在每次请求的最前面。
         所以它必须**逐字稳定**：
         - 不写时间戳、不写「用户说 / 助手回答」这类对话痕迹；
         - 不写寒暄、不写客套；
-        - 不写每轮会变的状态。
+        - 不写每轮都会变的数字和状态。
 
         只写下面这五类，每条一行，写不出来的不写：
         - 事实：用户提到的具体信息（名字、路径、数值、配置）
@@ -94,21 +123,4 @@ class ConversationSummarizer(
 
         控制在 $targetChars 字符以内。只输出摘要正文，不要任何解释或标题。
     """.trimIndent()
-
-    /** 把消息渲染成纯文本。 */
-    private fun render(messages: List<ChatMessage>): String = buildString {
-        for (m in messages) {
-            when (m) {
-                is UserMessage -> appendLine("[用户] ${m.content}")
-                is AssistantMessage -> {
-                    m.content?.takeIf { it.isNotBlank() }?.let { appendLine("[助手] $it") }
-                    if (m.toolCalls.isNotEmpty()) {
-                        appendLine("[助手] 调用工具：${m.toolCalls.joinToString { it.name }}")
-                    }
-                }
-                is ToolMessage -> appendLine("[工具结果] ${m.content.take(400)}")
-                else -> Unit
-            }
-        }
-    }
 }

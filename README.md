@@ -122,6 +122,7 @@ sdk-core/src/main/kotlin/ai/agentkernel/
 ├── protocol/
 │   ├── Messages.kt          # SystemMessage / UserMessage / AssistantMessage / ToolMessage
 │   ├── ToolCall.kt          # arguments 原始字符串 + argsOrEmpty() 执行前才 parse
+│   ├── ChatMessageCodec.kt  # 归档专用编解码（保留 content 的 null 与 finish_reason）
 │   └── ChatRequest.kt
 ├── kernel/
 │   ├── AgentKernel.kt       # 单轮循环（本仓库的核心）
@@ -139,6 +140,15 @@ sdk-core/src/main/kotlin/ai/agentkernel/
     └── exec/
         ├── CommandExecutor.kt  # execute(cmd) —— 内核↔设备唯一契约
         └── ShellTool.kt        # 把 tool_call 接到执行器的那根线
+├── memory/                     # 上下文压缩 + 长期记忆（**结论摘要**，进提示词）
+│   ├── ContextPolicy.kt        # 旋钮（容量 / 保留长度 / 闲置时长 / 记忆预算）
+│   ├── ContextMemory.kt        # 编排者：超容量→压一次、闲置→归档
+│   ├── ConversationSummarizer.kt # 一条摘要指令线（压缩与归档共用）
+│   ├── MemoryStore.kt          # var/memory/（跨话题的结论摘要）
+│   └── AgentMemoryCapabilities.kt # agent-memory 命令（list/get/add/edit/delete/search）
+├── archive/                    # 会话分段归档（**对话原文**，不进提示词，给前端翻）
+│   ├── ArchiveSegment.kt       # 一段的元信息（带链）+ 原文
+│   └── ArchiveStore.kt         # index.json + segments/；段与段之间有链
 
 sdk-android/src/main/kotlin/ai/agentkernel/android/
 ├── AndroidCommandExecutor.kt  # Runtime.exec，无 PTY（对应 Termux AppShell 路径）
@@ -167,12 +177,17 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 
 | 文件 | 覆盖什么 |
 |------|---------|
-| `sdk-android/src/test/kotlin/ai/agentkernel/CoreSelfTest.kt` | 内核循环、流式分片聚合、协议线格式、未知工具容错、maxTurns、真实进程执行、bootstrap 安装器、prefix 环境变量（**34 条断言**） |
+| `sdk-android/src/test/kotlin/ai/agentkernel/CoreSelfTest.kt` | 内核循环、流式分片聚合、协议线格式、未知工具容错、maxTurns、真实进程执行、bootstrap 安装器、prefix 环境变量（**8 条用例 / 35 处断言**） |
 | `sdk-android/src/test/kotlin/ai/agentkernel/EndToEndTest.kt` | **端到端**：起本地 OpenAI 兼容 mock 服务 → 真发 HTTP → 真按 OpenAI 线格式解析 `tool_calls` → 真执行命令 → 真把结果回填进下一次请求 → 收尾；外加流式 SSE 分片、命令失败、超时截断 |
 | `sdk-android/src/test/kotlin/ai/agentkernel/WireFormatTest.kt` | **线格式契约**：对齐生产链路那份「拿 live 流校验过」的形状（见下） |
 | `sdk-android/src/test/kotlin/ai/agentkernel/MockLlmServer.kt` | 那个 mock 服务端（裸 `ServerSocket` 写的，**故意不用 `com.sun.net.httpserver`** —— 后者在 Android 上不存在，这套 mock 要能原样搬到真机 instrumented test 里跑） |
-| `sdk-core/src/test/kotlin/ai/agentkernel/device/DeviceCapabilityTest.kt` | **能力路由**（纯 JVM，16 条）：认命令、拆参数、复合命令改写、失败转非零退出码、命令名逐字对齐 Termux |
+| `sdk-core/src/test/kotlin/ai/agentkernel/device/DeviceCapabilityTest.kt` | **能力路由**（纯 JVM，25 条）：认命令、拆参数、复合命令改写、失败转非零退出码、命令名逐字对齐 Termux |
 | `sdk-android/src/test/kotlin/ai/agentkernel/DeviceCapabilityRoutingTest.kt` | **能力接进执行器**：整条命令进程内执行（不起子进程）、失败退出码、复合命令结果回 stdout、能力清单进工具描述 |
+| `sdk-core/src/test/kotlin/ai/agentkernel/memory/ContextMemoryTest.kt` | **压缩与闲置归档**：超容量压一次、切分点不能落在工具结果上、归档后开新会话、**摘要掉的原文落归档段**（17 条） |
+| `sdk-core/src/test/kotlin/ai/agentkernel/archive/ArchiveStoreTest.kt` | **分段归档**：段与段之间的链、列表排序、分页不重不漏、原文能原样读回来、**索引坏了能从正文目录重建（链不丢）**（9 条） |
+
+> 当前全量：**sdk-core 168 条 + sdk-android 52 条**（后者在 debug / release 两个变体各跑一遍），
+> **0 跳过、0 失败、0 错误**。
 
 > 交付包原本的自测是一份手工 `main()`（`selftest/SelfTest.kt`），需要 661MB 的 `.toolchain/`
 > 才能跑，且**模型端是 `FakeLlm`** —— 也就是说「真发 HTTP / 真解析 tool_calls /
@@ -447,8 +462,15 @@ SDK 给你三样观测手段：
 result.usage      // Usage?：上游报的命中/未命中 token（不是本地估的）
 result.context    // ContextReport?：前缀有没有被动过、断点在下标几
 result.prefix     // PrefixReport?：**服务端**视角的前缀体检（网关回的）
-sdk.systemBudget()// 客户端 system 段会不会被网关截掉
+sdk.systemBudget()// 客户端 system 段会不会被服务端截掉（分四段报数）
 ```
+
+**system 段预算**分四段报：提示词 / 长期记忆 digest / 会话摘要 / 工作区告警。
+超限的代价是**静默截断**（服务端砍尾巴），所以 SDK **在发出去之前就主动协调**：
+砍得动的只有**长期记忆 digest**（它能用 `agent-memory search` 取回来），
+提示词 / 会话摘要 / 工作区告警**一律不砍**。
+连不可砍的部分都超了 ⇒ `b.overflow` 为真（那才是要改配置的信号）。
+详见接入指南 12.4。
 
 **上下文检测**靠 `ContextReport`：`prefixPreserved=false` 就说明**布局坏了**
 （`firstChangedIndex` 指出被改的那条）；前缀没坏却没命中 = 缓存还没建起来，等着就行。
@@ -531,7 +553,79 @@ cat $AGENT_ROOT/var/memory/index.json
 cat $AGENT_ROOT/var/memory/entries/*.md
 ```
 
-**不需要给 SDK 加任何新工具**。用法见 `skills/agent-memory/SKILL.md`。
+### agent 自己能增删改查（`agent-memory`）
+
+记忆不再只增不改 —— 有一条命令让 agent 自己维护它：
+
+```bash
+agent-memory list                        # 有哪些（id / 时间 / 标题 / 字数）
+agent-memory get 20261028-1432           # 读一条正文
+agent-memory search 网关                 # 按关键词找
+agent-memory add "用户确认：灌溉阈值按 80"   # 记一条
+agent-memory edit 20261028-1432 "改成：阈值按 60"  # 改一条
+agent-memory delete 20261028-1432        # 删一条
+```
+
+输出是 JSON，失败时 `ok:false` + 非零退出码。
+注册（路径由 SDK 算，**别自己拼**）：
+
+```kotlin
+val capabilities = DeviceCapabilityRegistry(
+    defaultDeviceCapabilities(
+        context,
+        memory = AndroidAgentSdk.memoryCapabilities(context),   // 记忆命令
+    )
+)
+```
+
+用法见 `skills/agent-memory/SKILL.md`。
+
+### 字数限制：提示词的系统文件 + 记忆的系统文件
+
+进 system 段的就两处：**服务端拼的提示词块**（平台提示词）和**本地拼的记忆/摘要**。
+两边都有闸：
+
+| 闸 | 在哪 | 默认 | 能调吗 |
+|---|---|---|---|
+| 客户端 system 段总长 | 服务端 | **6000** | ✅ 参数表，3 秒生效，带留痕 |
+| 平台提示词总长 | 服务端 | 8000 | ✅ 同上 |
+| 单块提示词长度 | 服务端 | 4000 | ✅ 同上 |
+
+- **服务端**：超了要么**拒写**（提示词工具报错，带实际字符数 + 上限 + 是哪个上限），
+  要么在装配时**整块丢掉**优先级最低的块（不截半块 —— 半块提示词是残缺指令）。
+  截客户端段时会打一条 **warn** 说人话，不静默。
+- **客户端（SDK）**：**主动协调** —— 能砍的只有**长期记忆 digest**
+  （它能用 `agent-memory search` 取回来），提示词 / 会话摘要 / 工作区告警**一律不砍**。
+  协调发生在**压缩之前**，所以压缩请求重放的前缀和主请求**逐字一致**（缓存不破）。
+
+```kotlin
+val b = sdk.systemBudget()
+b.promptChars; b.memoryChars; b.summaryChars; b.alertChars; b.totalChars
+b.over        // 实际超了 ⇒ 服务端会截
+b.overflow    // ★ 把记忆砍光也装不下 ⇒ 提示词本身太大，改配置
+```
+
+真机实测（小米 Android 16）：设备提示词 1883 + 记忆 digest 281 = **2166/6000** ✅；
+在老上限 2000 下，那 281 字符的记忆 digest **会被整段砍掉**（模型压根没看见）。
+
+### 压缩请求是**逐字重放**的（dsh 那一套）
+
+压缩那一次请求，**不是**把旧对话渲染成文本再发出去（旧版本那样做 ⇒ 压缩这次调用**不吃缓存**）。
+现在是：
+
+```
+稳定前缀（逐字） + 被遮蔽区原文（逐字） + 一条 user 压缩指令（放最后）
+```
+
+- **工具定义与主请求逐字一致**（不是空列表）—— 否则工具段一变，缓存从那儿起全废；
+- 压缩指令是**最后一条 user message** —— 放最前它就顶在稳定前缀外侧，差一个字整段前缀全废；
+- 指令正文：SDK 自带一份**本地兜底**（⇒ 直连 DeepSeek 官方也能用，不依赖后端）；
+  请求带 `compact: true` 时，**服务端可以用自己的提示词库替换掉这条指令**
+  （后端可调控，替换只动最后一条 user 消息 ⇒ 前缀继续命中）。
+
+⚠️ 切分点不能落在**工具结果**消息上（`assistant(tool_calls)` 后面那条 `tool`）——
+那样压缩请求会以一条没被回答的 tool_calls 结尾（上游 400），而且压完之后主请求里
+那条 tool 消息会失去它的 assistant（之后每轮都 400）。SDK 会把切分点往前挪。
 
 ### 宿主要做什么
 
@@ -551,6 +645,50 @@ history = result.messages.toMutableList()   // ← 压缩后的那份
 sdk.memory()?.archiveNow(history)
 ```
 
+### 摘要**不删原文**：会话分段归档
+
+摘要只是把旧内容**换了个说法**交给模型 —— **原文还在**。
+被摘要掉的那一段会落成一段**归档**，前端照常能翻、能显示。
+
+| | 内容 | 进提示词？ | 谁用 |
+|---|---|---|---|
+| **会话摘要** | 压缩出来的一句结论 | ✅ 进 | 模型「记得」之前聊过什么 |
+| **长期记忆** | 跨话题的结论摘要 | ✅ 进（预算内） | 模型记得「之前聊过什么」 |
+| **归档段** | 被摘要掉的**对话原文** | ❌ 不进 | **用户翻历史** |
+
+⇒ 摘要是给**模型**看的，归档是给**用户**看的。
+
+**落在哪儿**（普通文件，宿主/前端可以直接读）：
+
+```
+<agentRoot>/var/archive/
+  ├── index.json              ← 索引（每段一行元信息，新的在前）
+  └── segments/
+      └── 20261029-0012.json  ← 一段一份：元信息 + 原始消息
+```
+
+**段与段之间有链**：每段记 `prevId`（**更早**的一段）/ `nextId`（**更晚**的一段），
+前端顺着链往上翻就行。
+
+**前端怎么翻**（一次一段，不整包拉）：
+
+```kotlin
+val store = sdk.archive() ?: AndroidAgentSdk.archiveStore(context)
+
+// 首屏：只取最新的一段
+val first = store.list(limit = 1)
+// 往上滚：游标传当前最早那段，只取更早的一段
+val older = store.list(limit = 1, before = first.last().id)
+// 要这一段的原文
+val segment = store.read(first.first().id)   // segment.messages 是结构化的原始消息
+```
+
+⚠️ 归档里存的是**结构化消息**（不是渲染好的文本）——
+所以前端能照常区分「谁说的」「工具返回了什么」「为什么被截断」。
+
+**索引只是缓存**：正文才是本体。索引解析失败会从 `segments/` 目录重建
+（链是按时间顺序**推导**出来的，所以重建也不会丢链）。
+
 ### 代价
 
 压缩和归档**各要调一次模型**（真花钱）。这是有意的 ——
@@ -562,16 +700,20 @@ sdk.memory()?.archiveNow(history)
 `agent-sdk-demo/` 是一个**能点的演示台**（Kotlin + Compose），它按坐标依赖本 SDK
 （`mavenLocal()` + `ai.agentkernel:sdk-android:1.0.0`）——所以它同时是**外置接入的活样例**。
 
-三个页签：
+四个页签：
 
 | 页签 | 做什么 |
 |------|-------|
 | **能力台** | 每个能力一个图标，点一下就通过 SDK 在这台手机上真的执行，下方显示模型会看到的原始 JSON |
 | **自检** | 「一键自检」自动跑完全部能力 + 普通 shell 命令 + 权限现状，逐项给 ✅/⚠️/❌ 与耗时；**页底直接摆着「模型看到的系统提示词」原文** |
 | **对话** | 填服务地址 + token（或 DeepSeek 官方 key），让模型通过 bash 工具下发 `termux-*` 命令去驱动设备 |
+| **归档** | 摘要掉的那段对话**原文**在这里；首屏只取最新一段，往上滚一段一段加载更早的 |
 
-> 自检当前 **34 项**（Android 16 / 小米 / arm64-v8a 实测 **✅ 32 · ⚠️ 2 · ❌ 0**，
-> 两个 ⚠️ 是如实报告的系统限制：`CAMERA` 未授权、私有目录不能执行二进制）。
+> 自检当前 **34 项**（Android 16 / 小米 / arm64-v8a 实测 **✅ 31–32 · ⚠️ 2–3 · ❌ 0**，
+> **❌ 一项都没有**）。⚠️ 是如实报告的环境限制，不是缺陷：
+> `CAMERA` 未授权、私有目录不能执行二进制（Android 对私有目录 noexec），
+> 以及**读剪贴板**需要 App 有前台焦点（Android 10+ 的系统限制；
+> App 在后台时它就是 ⚠️，不是 ❌）。
 >
 > 自检本身也有三条规矩：**阈值不写死**（先量占用再压到一半）、
 > **空结果不算通过**（探测坏了 ≠ 没有）、**自检不留垃圾**（加的定时任务自己删掉）。

@@ -14,7 +14,7 @@ agent 只要「输出一条命令」，SDK 就负责把它跑起来并把结果�
 
 - **源码仓库**：<https://github.com/genghv/android-agent-sdk>
 - **发布包**（源码 zip + 可选的 Termux 运行时）：
-  <https://github.com/genghv/android-agent-sdk/releases/tag/v1.0.0>
+  <https://github.com/genghv/android-agent-sdk/releases/latest>
 - **许可**：Apache-2.0（见 [`LICENSE`](LICENSE)）
 - **第三方组件与许可**：见 [`NOTICE`](NOTICE)
 - **不依赖任何后端**：拿到源码 + 一个 DeepSeek API key 就能跑；

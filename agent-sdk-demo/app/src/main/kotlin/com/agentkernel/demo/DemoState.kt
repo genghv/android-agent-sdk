@@ -167,12 +167,12 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      *
      * 这不是洁癖：两者一旦不一致，自检那条「提示词·命令清单与真机一致」就变成
      * **验了一份模型根本没看到的提示词** —— 自检会显示 ✅，而真机上的提示词早被服务端截断了。
-     * （真机实测：自检显示 2197 字符、实际对话用的是 1797。）
      *
-     * Demo 取 **CORE**（1797 字符）：它是「在**上限被调小**的服务上也装得下」的
-     * **安全值** —— 就算运营把网关的 `client_system_max_chars` 调回老值 2000，
-     * 提示词尾部也不会被砍掉。
-     * 直连 DeepSeek 官方没有这个上限，那边可以用 SDK 的默认值 FULL（2197 字符）。
+     * Demo 取 **CORE**：它是「在**上限被调小**的服务上也装得下」的**安全值** ——
+     * 提示词本体守住 SDK 自己那条 2000 字符保险线（[PROMPT_BODY_INSURANCE_LINE]，
+     * 由 `DevicePromptBudgetTest` 硬断言），余量不多，往里加东西前先量。
+     * 真机实测（小米 Android 16）：CORE = **1933 字符**，余量 ≈ 67；
+     * 完整模式 = 2403 字符（直连 DeepSeek 官方没有 system 段上限时用它）。
      */
     private val commandDetail = AgentSystemPrompt.CommandDetail.CORE
 
@@ -958,7 +958,10 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                         val firstLine = r.output.trim().lineSequence().firstOrNull().orEmpty()
                         appendLine("$name → exit=${r.exitCode} $firstLine")
                     }
-                    // 提示词有多长 —— 网关会把客户端 system 段**截到上限**，超了就砍尾巴
+                    // 提示词有多长 —— **两条预算都得报**，只报一条会误导人：
+                    //   ① 提示词本体 < 2000（SDK 自己的保险线，`DevicePromptBudgetTest` 硬断言）
+                    //   ② system 段总长上限（服务端参数 client_system_max_chars，默认 6000，可调）
+                    // 网关会把客户端 system 段**截到上限**，超了就砍尾巴
                     //（长期记忆 digest / 会话摘要 / 工作区告警正好排在最后）。这个数字得看得见。
                     val promptLen = systemPrompt.length
                     val fullLen = AndroidAgentSdk.buildSystemPrompt(
@@ -968,8 +971,10 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                         commandDetail = ai.agentkernel.prompt.AgentSystemPrompt.CommandDetail.FULL,
                     )?.length ?: -1
                     appendLine("提示词长度：核心模式 $promptLen 字符 / 完整模式 $fullLen 字符" +
-                        "（客户端 system 段上限 $segLimit → " +
-                        if (promptLen > segLimit) "⚠️ 核心模式也会被截断！" else "核心模式装得下）")
+                        "（提示词本体保险线 $PROMPT_BODY_INSURANCE_LINE → " +
+                        if (promptLen > PROMPT_BODY_INSURANCE_LINE) "⚠️ 核心模式超了这条线！" else "核心模式装得下；" +
+                        "system 段总长上限 $segLimit → " +
+                        if (promptLen > segLimit) "⚠️ 核心模式也会被截断！" else "也装得下）")
                 }.trim(),
                 elapsedMs = probeResults.sumOf { it.second.elapsedMs },
             )
@@ -977,9 +982,13 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 "CHECK",
                 "${if (promptOk) "✅" else "❌"} 提示词·命令清单与真机一致 | claimed=${claimed.size} " +
                     "missing=${missing.size} probe=${probeResults.size - probeFailed.size}/${probeResults.size} " +
-                    // 提示词有多长 —— 网关把客户端 system 段**截到上限**，超了砍尾巴，
-                    // 而砍掉的正好是最后面的工作区规则/长期记忆/会话摘要。这个数字必须看得见。
-                    "| prompt=${systemPrompt.length} chars (client system cap=$segLimit → " +
+                    // 提示词有多长 —— **两条预算都报**：提示词本体的保险线（2000，SDK 自己守）
+                    // 与 system 段总长上限（服务端参数，可调）。只报 6000 会让人以为
+                    // 提示词可以随便加到 6000 —— 其实真正卡住提示词的是那条 2000 保险线。
+                    "| prompt=${systemPrompt.length} chars " +
+                    "(prompt-body limit=$PROMPT_BODY_INSURANCE_LINE " +
+                    if (systemPrompt.length > PROMPT_BODY_INSURANCE_LINE) "超线!; " else "OK; " +
+                    "client system cap=$segLimit " +
                     if (systemPrompt.length > segLimit) "会被截断!)" else "装得下)",
             )
 
@@ -1072,9 +1081,12 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 executor = executor,
                 // ★ 系统提示词由 SDK 生成（环境 / 命令清单 / 能力边界 / 工作区规则），
                 //   这里不用手写 —— 手写的版本会跟实际注册的能力对不上。
-                // ★ 命令清单用 CORE：网关的客户端 system 段上限是**可调参数**
-                //   （client_system_max_chars，默认 6000）。完整清单(2197)在 6000 下装得下，
-                //   但运营随时可能把上限调小 —— CORE 是「上限再小也不被砍尾巴」的安全值。
+                // ★ 命令清单用 CORE：这里有**两条不同的预算**，别混。
+                //   ① system 段总长上限（client_system_max_chars，默认 6000）—— 服务端参数，**可调**；
+                //   ② 提示词本体的保险线（2000）—— SDK 自己守的（DevicePromptBudgetTest 硬断言）。
+                //   完整清单(FULL，约 2400 字符)装得进 ①，但**装不进 ②** ——
+                //   而真正卡住提示词的是 ②：上限随时可能被调回小值，那时尾巴（能力清单、
+                //   工作区维护规则）就会被砍掉。CORE 是「两条都装得下」的安全值（实测 1933）。
                 //   直连 DeepSeek 官方没有这个限制，那边可以用 SDK 的默认值 FULL。
                 // ★ 用 DemoState.commandDetail —— 和自检那份**同一个值**（否则自检在验另一份）。
                 commandDetail = commandDetail,
@@ -1733,6 +1745,19 @@ class DemoState(app: Application) : AndroidViewModel(app) {
         Regex("exitCode: (-?\\d+)").find(rendered)?.groupValues?.get(1)?.toIntOrNull() ?: -1
 
     private companion object {
+        /**
+         * **提示词本体的保险线** —— 与 `client_system_max_chars` 是**两条不同的预算**，别混。
+         *
+         * - system 段总长（提示词 + 记忆 + 摘要 + 告警）= 服务端参数 `client_system_max_chars`，
+         *   默认 6000、**可调**；
+         * - **提示词本体 < 2000** = SDK 自己那条保险线（`DevicePromptBudgetTest` 硬断言）——
+         *   上限随时可能被调回小值，提示词自己守住这条线，尾巴才不会被砍掉
+         *   （砍掉的正好是「能力清单」和「工作区维护规则」）。
+         *
+         * 自检里**两个数都要显示**，否则会让人以为提示词可以随便加到 6000。
+         */
+        const val PROMPT_BODY_INSURANCE_LINE = 2000
+
         const val KEY_URL = "url"
         const val KEY_TOKEN = "token"
         const val KEY_MODEL = "model"

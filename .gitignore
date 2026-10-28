@@ -1,0 +1,19 @@
+# 构建产物与本地工具链（不进仓库）
+.toolchain/
+build/
+.gradle/
+.kotlin/
+out/
+.idea/
+*.iml
+
+# 本机路径（sdk.dir 指向本机 Android SDK，换机器必失效）
+# 改用环境变量 ANDROID_HOME 也行 —— 二选一即可。
+local.properties
+
+# 大压缩包不进仓库。
+#
+# ★ bootstrap-aarch64-lean.zip 是 **Termux 的 GPLv3 运行时载荷**（~22MB）：
+#   它以 Release 附件的形式单独分发，不进 git 历史。
+#   取法与许可义务见 bootstrap/README.md。
+*.zip

@@ -1,0 +1,41 @@
+# NOTICE
+
+android-agent-sdk
+Copyright 2026 android-agent-sdk contributors
+
+本产品包含以下第三方软件，其许可条款见各自的项目与分发包：
+
+## 依赖（通过 Gradle / Maven 拉取，不随本仓库分发）
+
+| 组件 | 用途 | 许可 |
+|---|---|---|
+| Kotlin 标准库 / kotlinx-coroutines | 协程 | Apache-2.0 |
+| kotlinx-serialization-json | JSON 解析与序列化 | Apache-2.0 |
+| OkHttp (com.squareup.okhttp3) | Android 侧 HTTP 传输 | Apache-2.0 |
+| JUnit / kotlin-test（仅测试） | 单元测试 | EPL-1.0 / Apache-2.0 |
+
+## 可选的 Termux 运行时（**不在本仓库内**）
+
+`bootstrap/` 目录下的 `bootstrap-aarch64-lean.zip` 是**精简版 Termux 运行时**
+（bash / coreutils / curl 等），来自 Termux 项目，**GPLv3**。
+
+因为它带 GPLv3 组件、且**在 Android 10+（targetSdk ≥ 29）上因 noexec 根本跑不起来**
+（真机实测退出码 126：`/system/bin/sh: ./t: Permission denied`），
+本仓库**不把它打包进主发行包**。它以**独立压缩包**的形式单独分发。
+
+该归档**自带完整许可包**（解压后位于 `share/LICENSES/`）：`GPL-3.0.txt` 等 25 份许可正文，
+以及 `share/doc/termux-licenses/copyright` 与逐文件校验清单
+（`var/lib/dpkg/info/termux-licenses.list` / `.md5sums`）。
+⇒ **二次分发时请把许可文本一并带上**（GPLv3 §4），不要只取二进制。
+
+主包自身是 Apache-2.0，与这个 GPLv3 运行时是**两个独立作品**，故刻意拆开分发。
+详见 **bootstrap 独立包**内的 `README.md`。
+
+**要不要用、用哪种替代方案，见《接入指南》的「私有目录不能执行二进制」一节。**
+
+## 硬件能力命令的命名
+
+设备能力命令名（`termux-torch` / `termux-vibrate` / `termux-notification` /
+`termux-clipboard-get` / `termux-clipboard-set` / `termux-battery-status`）
+与 **Termux:API** 的命令名逐字对齐，以便模型按既有习惯书写。
+本项目**不包含 Termux:API 的代码**，仅对齐命令名以保证互操作。

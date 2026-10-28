@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 内核要联网调 LLM API -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- 执行命令 / 读写文件所需的基础权限（按需在宿主 App 里申请） -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+    <!--
+        设备能力（termux-* 那一批）所需的普通权限。
+        这些**不是特权**：不需要 su / Shizuku，宿主 App 正常申请即可。
+        高级权限（装应用 / 点屏 / 改系统设置）不在这里 —— 按边界，
+        `ShizukuBridge` 保持 Noop，不给手机碰。
+    -->
+    <!-- 手电筒 termux-torch -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 震动 termux-vibrate -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- 通知 termux-notification（API 33+ 需要运行时授权） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 手电筒需要摄像头里有闪光灯；没有就别硬要，SDK 会直接回报「这台设备没有带闪光的摄像头」。 -->
+    <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
+
+</manifest>

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 9（API 28）起默认**禁止明文 HTTP**。
+
+    这份配置只放行**指定的域名**，不是全局放行 —— 生产环境应该尽量用 https；
+    确实需要明文的内部接口，在这里逐个列出。
+
+    ⚠️ 这是**宿主 App** 的配置，SDK 不该也不该替宿主改（宿主才知道自己的接口域名）。
+-->
+<network-security-config>
+    <!-- 系统与公共 CA 照常信任 -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- 演示用：放行这几个明文地址 -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">www.baidu.com</domain>
+        <domain includeSubdomains="false">baidu.com</domain>
+        <!-- 自建服务（按实际部署地址改） -->
+        <domain includeSubdomains="false">your-service.example.com</domain>
+        <!--
+            本机回环：手机通过 `adb reverse tcp:8080 tcp:8080` 打到宿主机的服务时用。
+            （没有这一条，OkHttp 会报
+              CLEARTEXT communication to 127.0.0.1 not permitted by network security policy）
+            ⚠️ 生产环境别放行回环地址 —— 这里只是演示/联调用。
+        -->
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

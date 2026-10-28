@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  仪器化测试自己的 manifest。
+  这里只声明一个给测试用的空 Activity（FocusActivity）——
+  目的是让测试 App 拿到前台焦点，否则 Android 10+ 不让读剪贴板。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name="ai.agentkernel.FocusActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.Light" />
+    </application>
+</manifest>

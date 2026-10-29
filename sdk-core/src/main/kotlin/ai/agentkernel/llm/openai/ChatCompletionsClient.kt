@@ -49,6 +49,17 @@ class ChatCompletionsClient(
     private val extraHeaders: Map<String, String> = emptyMap(),
     /** chat 端点的路径。服务若不是标准路径，改这里。 */
     private val chatPath: String = "/chat/completions",
+    /**
+     * 「思考强度」用**哪种线格式**发出去（默认 [ReasoningWire.GATEWAY]）。
+     *
+     * `reasoning_strength` 是**我们网关的私有字段**：网关按该模型的目录把编码翻译成厂商档位。
+     * **直连厂商官方时那一层不存在** ⇒ 编码没人翻译 ⇒ 厂商要么忽略、要么 400
+     * （多数厂商忽略 ⇒ **静默不生效**，比报错更糟）。
+     *
+     * 走我们的网关 ⇒ 不用管；直连 DeepSeek 官方 ⇒ [ReasoningWire.DEEPSEEK]；
+     * 直连 OpenAI 系 ⇒ [ReasoningWire.OPENAI]。拿不准就**显式写出来**。
+     */
+    private val reasoningWire: ReasoningWire = ReasoningWire.GATEWAY,
 ) : LlmClient {
 
     /**
@@ -63,7 +74,14 @@ class ChatCompletionsClient(
         apiKey: String,
         transport: Transport,
         extraHeaders: Map<String, String> = emptyMap(),
-    ) : this(baseUrl, transport, LlmAuth.bearer(apiKey), extraHeaders)
+        /**
+         * 思考强度的线格式（见 [ReasoningWire]）。
+         *
+         * **直连厂商官方时要换** —— `reasoning_strength` 是网关私有字段，
+         * 发给厂商只会被忽略或 400（**静默不生效**）。
+         */
+        reasoningWire: ReasoningWire = ReasoningWire.GATEWAY,
+    ) : this(baseUrl, transport, LlmAuth.bearer(apiKey), extraHeaders, reasoningWire = reasoningWire)
 
     companion object {
         /** DeepSeek 官方 API 地址（OpenAI 线格式兼容）。 */
@@ -81,7 +99,25 @@ class ChatCompletionsClient(
             transport: Transport,
             baseUrl: String = DEEPSEEK_BASE_URL,
             extraHeaders: Map<String, String> = emptyMap(),
-        ): ChatCompletionsClient = ChatCompletionsClient(baseUrl, apiKey, transport, extraHeaders)
+            /**
+             * 思考强度的线格式。
+             *
+             * **默认按地址自动选**：地址是 DeepSeek 官方 ⇒ [ReasoningWire.DEEPSEEK]
+             * （官方只认 `thinking`；发网关的 `reasoning_strength` 会被忽略 ⇒ 静默不生效）；
+             * 换成别的地址（自建网关）⇒ 保持 [ReasoningWire.GATEWAY]（与以前一样）。
+             */
+            reasoningWire: ReasoningWire = if (baseUrl == DEEPSEEK_BASE_URL) {
+                ReasoningWire.DEEPSEEK
+            } else {
+                ReasoningWire.GATEWAY
+            },
+        ): ChatCompletionsClient = ChatCompletionsClient(
+            baseUrl = baseUrl,
+            transport = transport,
+            auth = LlmAuth.bearer(apiKey),
+            extraHeaders = extraHeaders,
+            reasoningWire = reasoningWire,
+        )
     }
 
 
@@ -158,7 +194,10 @@ class ChatCompletionsClient(
         }
         // 思考强度：**主契约是强度编码**（2 的幂，跨模型稳定 —— 换模型不用改用户存的值）。
         // 不传 = 服务端用它的默认档位（省一次往返，也让网关的默认策略生效）。
-        request.reasoningStrength?.let { put("reasoning_strength", it) }
+        // ★ 发出去的**形状**看对端是谁（见 [ReasoningWire]）：
+        //   网关吃 `reasoning_strength`；直连厂商官方时它是个**没人翻译的私有字段**
+        //   ⇒ 厂商要么忽略、要么 400 ⇒ 静默不生效。
+        reasoningWire.putStrength(this, request.reasoningStrength)
         // 会话标识:让服务端能独立复核「这一轮是不是上一轮的追加扩展」(前缀缓存的前提)。
         request.sessionId?.let { put("session_id", it) }
         request.extra.forEach { (k, v) -> put(k, v) }

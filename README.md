@@ -192,7 +192,9 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 
 | `sdk-core/src/test/kotlin/ai/agentkernel/tools/exec/ExecOutputTruncationTest.kt` | **工具输出截断**（5 条）：**总长 ≤ 上限**（标记行算进预算）/ 默认上限也是硬线 / **标记里的「省略 N 字符」等于真正没露出来的原文数**（输出大到位数变化时也不失真）/ 上限小到放不下标记时给原文开头，**不返回空串** |
 
-> 当前全量：**sdk-core 281 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
+| `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningWireTest.kt` | **思考强度的线格式**（9 条）：网关形状发 `reasoning_strength`（默认，既有调用方零影响）/ **DeepSeek 形状只发 `thinking`、绝不发 `reasoning_strength`** / **OpenAI 形状只发 `reasoning_effort`** / 取上限内最高的已知档（只向下）/ 强度没设就什么都不发 / `deepSeek` 工厂按地址自动选形状 / 宿主的 `extra` 仍然最后生效 |
+
+> 当前全量：**sdk-core 290 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
 > **0 跳过、0 失败、0 错误**。
 
 > 交付包原本的自测是一份手工 `main()`（`selftest/SelfTest.kt`），需要 661MB 的 `.toolchain/`
@@ -397,6 +399,7 @@ val client = ChatCompletionsClient(
 | `model` | `AndroidAgentSdk` | 模型名。DeepSeek 官方：`deepseek-chat`（不思考、快）/ `deepseek-reasoner`（会推理） |
 | `maxTokens` | `AndroidAgentSdk` | 回答的 token 上限（`max_tokens`）。**不填就不带这个字段**，由服务端用默认值 |
 | `reasoningStrength` | `AndroidAgentSdk` | 思考强度的**强度编码**（2 的幂：1=关闭思考 / 2=low / 4=medium / 8=high / 16=max）。**不填就不带**，由服务端用默认档；它是**上限**（服务端只向下取）。合法档位用 `EffortCatalogClient` 问服务端要，别自己抄 |
+| `reasoningWire` | `ChatCompletionsClient` | 思考强度的**线格式**（`ReasoningWire`）：`GATEWAY`（默认，发 `reasoning_strength`）/ `DEEPSEEK`（发 `thinking`）/ `OPENAI`（发 `reasoning_effort`）。**直连厂商官方时必须换** —— `reasoning_strength` 是网关私有字段，发给厂商只会被忽略或 400（**静默不生效**）。`deepSeek(...)` 工厂按地址自动选 |
 | `temperature` | `AndroidAgentSdk` | 采样温度 |
 | `extraRequest` | `AndroidAgentSdk` | 透传任意 JSON 字段（厂商扩展参数） |
 | `maxTurns` | `AndroidAgentSdk` | 一轮最多几次模型往返，默认 32 |

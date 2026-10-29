@@ -10,6 +10,7 @@ import ai.agentkernel.kernel.KernelEvent
 import ai.agentkernel.kernel.TurnResult
 import ai.agentkernel.llm.LlmClient
 import ai.agentkernel.llm.openai.ChatCompletionsClient
+import ai.agentkernel.llm.openai.ReasoningWire
 import ai.agentkernel.memory.AgentMemoryCapabilities
 import ai.agentkernel.memory.ContextMemory
 import ai.agentkernel.memory.ContextPolicy
@@ -758,6 +759,23 @@ class AndroidAgentSdk(
              * ```
              */
             memoryPolicy: ContextPolicy? = null,
+            /**
+             * 思考强度编码（2 的幂，见 [ai.agentkernel.llm.openai.ReasoningStrength]）。
+             *
+             * null = **不带**这个字段，由对端用它自己的默认档位。
+             */
+            reasoningStrength: Int? = null,
+            /**
+             * 思考强度的**线格式**（见 [ai.agentkernel.llm.openai.ReasoningWire]）。
+             *
+             * 默认按地址自动选：DeepSeek 官方 ⇒ 官方形状（`thinking`）；
+             * 其它地址（自建网关）⇒ 网关形状（`reasoning_strength`）。
+             */
+            reasoningWire: ReasoningWire = if (baseUrl == ChatCompletionsClient.DEEPSEEK_BASE_URL) {
+                ReasoningWire.DEEPSEEK
+            } else {
+                ReasoningWire.GATEWAY
+            },
             onEvent: (KernelEvent) -> Unit = {},
         ): AndroidAgentSdk {
             val executor = if (capabilities == null) {
@@ -766,7 +784,12 @@ class AndroidAgentSdk(
                 AndroidCommandExecutor.forContext(context, capabilities)
             }
             return AndroidAgentSdk(
-                llm = ChatCompletionsClient.deepSeek(apiKey = apiKey, transport = OkHttpTransport(), baseUrl = baseUrl),
+                llm = ChatCompletionsClient.deepSeek(
+                    apiKey = apiKey,
+                    transport = OkHttpTransport(),
+                    baseUrl = baseUrl,
+                    reasoningWire = reasoningWire,
+                ),
                 model = model,
                 executor = executor,
                 maxTurns = maxTurns,
@@ -775,6 +798,7 @@ class AndroidAgentSdk(
                 temperature = temperature,
                 commandDetail = commandDetail,
                 memoryPolicy = memoryPolicy,
+                reasoningStrength = reasoningStrength,
             )
         }
     }

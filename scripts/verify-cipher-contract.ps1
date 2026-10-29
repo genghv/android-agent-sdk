@@ -14,7 +14,8 @@
 param(
     [string]$Tag = '',
     [string]$Asset = 'android-agent-sdk-cipher-v1.0.0-20261029.aar',
-    [int]$ExpectedCases = 12
+    [int]$ExpectedCases = 12,
+    [string]$Token = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,20 +34,53 @@ $jarPath = Join-Path $libs 'cipher-classes.jar'
 $tmpAar  = Join-Path $env:TEMP ("cipher-verify-" + [guid]::NewGuid().ToString('N') + '.aar')
 $startedAt = Get-Date
 
-$apiHeaders = @{ 'User-Agent' = 'mavis-verify' }
+# ★ 取 release 元数据。三条通道，按可靠性排：
+#   ① `gh api`（本机装了 gh 且已登录）⇒ **带令牌**，不吃那个共享配额；
+#   ② `-Token` 指定的 PAT；
+#   ③ 裸 `Invoke-RestMethod`（未认证）⇒ **60 次/小时/IP 的共享配额**，可能撞限流。
+#
+# ⚠️ ★ **配额耗尽 / 网络不通 ⇒ 不可判（退出码 2），不是「不通过（1）」。**
+#   2026-10-29 实踩：本脚本原先用裸 Invoke-RestMethod，撞到未认证配额后抛的是
+#   **未捕获异常、退出码 1** ⇒ 环境问题被报成「验证失败」——
+#   那正是「门禁红了，但它量的不是事实」：调用方会以为产物有问题。
+#   （脚本自己的约定：0=通过 / 1=不通过 / 2=不可判。）
+function Get-ReleaseMeta([string]$path) {
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $raw = & gh api $path 2>&1
+        $rc = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+        if ($rc -eq 0) { return (($raw | Out-String) | ConvertFrom-Json) }
+        Write-Output ("  · gh api 失败（exit={0}）⇒ 回落到下一条通道" -f $rc)
+    }
+    $h = @{ 'User-Agent' = 'mavis-verify' }
+    if ($Token) { $h['Authorization'] = "Bearer $Token" }
+    return (Invoke-RestMethod -Uri "https://api.github.com/$path" -Headers $h)
+}
 
 Write-Output '=== 1. 取 release 资产的 digest（独立于下载通道）==='
 $chosen = $null
-if ($Tag) {
-    $rel = Invoke-RestMethod -Uri "$apiBase/releases/tags/$Tag" -Headers $apiHeaders
-    $hit = @($rel.assets) | Where-Object { $_.name -eq $Asset } | Select-Object -First 1
-    if ($hit) { $chosen = [pscustomobject]@{ Tag = $rel.tag_name; AssetObj = $hit } }
-} else {
-    $rels = Invoke-RestMethod -Uri "$apiBase/releases?per_page=10" -Headers $apiHeaders
-    foreach ($r in @($rels)) {
-        $hit = @($r.assets) | Where-Object { $_.name -eq $Asset } | Select-Object -First 1
-        if ($hit) { $chosen = [pscustomobject]@{ Tag = $r.tag_name; AssetObj = $hit }; break }
+try {
+    if ($Tag) {
+        $rel = Get-ReleaseMeta "repos/$repo/releases/tags/$Tag"
+        $hit = @($rel.assets) | Where-Object { $_.name -eq $Asset } | Select-Object -First 1
+        if ($hit) { $chosen = [pscustomobject]@{ Tag = $rel.tag_name; AssetObj = $hit } }
+    } else {
+        $rels = Get-ReleaseMeta "repos/$repo/releases?per_page=10"
+        foreach ($r in @($rels)) {
+            $hit = @($r.assets) | Where-Object { $_.name -eq $Asset } | Select-Object -First 1
+            if ($hit) { $chosen = [pscustomobject]@{ Tag = $r.tag_name; AssetObj = $hit }; break }
+        }
     }
+}
+catch {
+    Write-Output ('  ✗ 取 release 元数据失败（网络不通，或未认证配额已耗尽）：')
+    Write-Output ('    ' + $_.Exception.Message)
+    Write-Output '  ⇒ **不可判**（不是「不通过」）'
+    Write-Output '    两条出路：① 装 gh 并登录（gh auth login）⇒ 脚本自动走带令牌的通道；'
+    Write-Output '    ② 传一个 PAT：-Token ghp_xxx（只读公开仓其实不需要，但能绕开配额）'
+    exit 2
 }
 if (-not $chosen) {
     Write-Output "  找不到资产 $Asset（用 -Tag 指定 release，或 -Asset 换名字）"

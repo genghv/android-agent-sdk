@@ -135,17 +135,21 @@ class ChatCompletionsClient(
     /** 非流式：一次性拿到整块 JSON。 */
     suspend fun completeNonStreaming(request: ChatRequest): AssistantMessage {
         val body = buildBody(request, stream = false)
-        val resp = post(request, body, accept = "application/json")
-        return parseAssistant(resp)
+        // ★ 头**只组装一次**：动态取 token 的实现（`bearerDynamic`）每次调用都会现取一次 ——
+        //   组装两次就等于取两次 token（第二次的值可能都不同了）。
+        val hdrs = headers("application/json")
+        val resp = post(request, body, hdrs)
+        return parseAssistant(resp, hdrs)
     }
 
     /** 流式：把 SSE 分片经 BlockAssembler 聚合后再返回（arguments 必须聚合才完整）。 */
     suspend fun completeStreaming(request: ChatRequest): AssistantMessage {
         val body = buildBody(request, stream = true)
-        val raw = post(request, body, accept = "text/event-stream")
+        val hdrs = headers("text/event-stream")
+        val raw = post(request, body, hdrs)
         // 有些服务端不理会 stream:true，仍回一整块 JSON。
         // 那不能当成「一条没有内容的流」—— 那样会静默丢掉模型说的话。
-        if (!looksLikeSse(raw)) return parseAssistant(raw)
+        if (!looksLikeSse(raw)) return parseAssistant(raw, hdrs)
         val assembler = BlockAssembler()
         SseParser.parse(raw) { data ->
             assembler.accept(deltaFromChunk(data))
@@ -186,19 +190,27 @@ class ChatCompletionsClient(
      * 两个传输实现都用 `error(...)` ⇒ 上游 HTTP 错误是 [IllegalStateException]。
      * 这里**换回同类型**（原消息原样留在前缀里），宿主的 `catch` 与日志匹配都不受影响。
      * 其它异常类型（IO / 超时）**原样抛出**，不做包装。
+     *
+     * ## ⚠️ 为什么**不**把原异常挂在 cause 上
+     *
+     * 原异常的消息里可能带着**凭据明文**（上游把 `Authorization` 回显在错误体里，
+     * 传输层没抹 —— 宿主自定义的传输不一定抹）⇒
+     * 把它挂在 cause 上等于**把明文又留在异常链里**，宿主一打日志就漏出去。
+     * ⇒ 这里**只搬栈**（`stackTrace` 原样复制过去），**不保留原异常对象**。
      */
-    private suspend fun post(request: ChatRequest, body: String, accept: String): String =
+    private suspend fun post(request: ChatRequest, body: String, hdrs: Map<String, String>): String =
         try {
             transport.post(
                 url = "$baseUrl$chatPath",
-                headers = headers(accept),
+                headers = hdrs,
                 body = body,
             )
         } catch (e: IllegalStateException) {
-            throw IllegalStateException(
-                "${e.message}\n请求形状：${shapeSummary(request)}",
-                e,
+            val safe = IllegalStateException(
+                "${HeaderRedaction.redact(e.message ?: "", hdrs)}\n请求形状：${shapeSummary(request)}"
             )
+            safe.stackTrace = e.stackTrace
+            throw safe
         }
 
     /** 请求形状摘要（**只有数量与布尔**）。 */
@@ -244,11 +256,14 @@ class ChatCompletionsClient(
         request.extra.forEach { (k, v) -> put(k, v) }
     }.toString()
 
-    private fun parseAssistant(resp: String): AssistantMessage {
+    private fun parseAssistant(resp: String, hdrs: Map<String, String>): AssistantMessage {
         val root = Json.parseToJsonElement(resp).jsonObject
-        val choices = root["choices"]?.jsonArray ?: error("响应缺少 choices: ${resp.take(500)}")
+        // ⚠️ 响应体片段也会进异常消息 ⇒ 同样要**先抹凭据**（上游可能把它回显在响应里）。
+        val choices = root["choices"]?.jsonArray
+            ?: error("响应缺少 choices: ${HeaderRedaction.redact(resp, hdrs).take(500)}")
         val choice = choices[0].jsonObject
-        val msg = choice["message"]?.jsonObject ?: error("响应缺少 message: ${resp.take(500)}")
+        val msg = choice["message"]?.jsonObject
+            ?: error("响应缺少 message: ${HeaderRedaction.redact(resp, hdrs).take(500)}")
         val content = msg["content"]?.jsonPrimitive?.contentOrNull
         val calls = msg["tool_calls"]?.jsonArray?.map { ToolCall.fromJson(it.jsonObject) } ?: emptyList()
         // 思考模式的思维链：**有就解析**（回不回调传是线格式那一层的事，见 [AssistantMessage.toJson]）。

@@ -34,7 +34,9 @@ class JdkHttpTransport(
             headers.forEach { (k, v) -> builder.header(k, v) }
             val resp = client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
             if (resp.statusCode() !in 200..299) {
-                error("LLM HTTP ${resp.statusCode()}: ${resp.body().take(500)}")
+                // ⚠️ **先抹后截**：上游可能把 Authorization 原样回显在错误体里 ——
+                //   这段文本会进异常消息、再回灌给模型 ⇒ 明文 key 不能跟着走。
+                error("LLM HTTP ${resp.statusCode()}: ${HeaderRedaction.redact(resp.body(), headers).take(500)}")
             }
             resp.body()
         }
@@ -48,7 +50,7 @@ class JdkHttpTransport(
             headers.forEach { (k, v) -> builder.header(k, v) }
             val resp = client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
             if (resp.statusCode() !in 200..299) {
-                error("LLM HTTP ${resp.statusCode()}: ${resp.body().take(500)}")
+                error("LLM HTTP ${resp.statusCode()}: ${HeaderRedaction.redact(resp.body(), headers).take(500)}")
             }
             resp.body()
         }

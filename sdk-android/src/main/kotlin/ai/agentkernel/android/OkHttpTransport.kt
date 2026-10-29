@@ -1,6 +1,7 @@
 package ai.agentkernel.android
 
 import ai.agentkernel.llm.openai.GetTransport
+import ai.agentkernel.llm.openai.HeaderRedaction
 import ai.agentkernel.llm.openai.Transport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -29,7 +30,11 @@ class OkHttpTransport(
             headers.forEach { (k, v) -> builder.addHeader(k, v) }
             client.newCall(builder.build()).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) error("LLM HTTP ${resp.code}: ${text.take(500)}")
+                if (!resp.isSuccessful) {
+                    // ⚠️ **先抹后截**：上游可能把 Authorization 原样回显在错误体里 ——
+                    //   这段文本会进异常消息、再回灌给模型 ⇒ 明文 key 不能跟着走。
+                    error("LLM HTTP ${resp.code}: ${HeaderRedaction.redact(text, headers).take(500)}")
+                }
                 text
             }
         }
@@ -41,7 +46,9 @@ class OkHttpTransport(
             headers.forEach { (k, v) -> builder.addHeader(k, v) }
             client.newCall(builder.build()).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) error("LLM HTTP ${resp.code}: ${text.take(500)}")
+                if (!resp.isSuccessful) {
+                    error("LLM HTTP ${resp.code}: ${HeaderRedaction.redact(text, headers).take(500)}")
+                }
                 text
             }
         }

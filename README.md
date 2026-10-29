@@ -190,7 +190,9 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 | `sdk-core/src/test/kotlin/ai/agentkernel/archive/ArchiveStoreTest.kt` | **分段归档**：段与段之间的链、列表排序、分页不重不漏、原文能原样读回来、**索引坏了能从正文目录重建（链不丢）**（20 条） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/TestVoidReturnTest.kt` | **「每条测试都真的跑了」**（1 条）：扫一遍测试源码集，只要还有**返回类型不是 `void`** 的 `@Test` 就失败 —— 挡的是「测试存在、却被 JUnit 5 静默忽略」这类漏网（不执行、不报错、套件照样全绿） |
 
-> 当前全量：**sdk-core 276 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
+| `sdk-core/src/test/kotlin/ai/agentkernel/tools/exec/ExecOutputTruncationTest.kt` | **工具输出截断**（5 条）：**总长 ≤ 上限**（标记行算进预算）/ 默认上限也是硬线 / **标记里的「省略 N 字符」等于真正没露出来的原文数**（输出大到位数变化时也不失真）/ 上限小到放不下标记时给原文开头，**不返回空串** |
+
+> 当前全量：**sdk-core 281 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
 > **0 跳过、0 失败、0 错误**。
 
 > 交付包原本的自测是一份手工 `main()`（`selftest/SelfTest.kt`），需要 661MB 的 `.toolchain/`

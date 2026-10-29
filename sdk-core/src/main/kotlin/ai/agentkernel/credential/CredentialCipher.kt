@@ -26,7 +26,9 @@ package ai.agentkernel.credential
  * // 宿主（App）把实现注进来 —— 闭源 .aar 里的那个类
  * CredentialCipherLoader.register("com.example.KeystoreCredentialCipher")
  *
- * val store = CredentialStore(dir = File(filesDir, "agent/var/credentials"), cipher = CredentialCipherLoader.resolve())
+ * // ⚠️ 凭据目录必须放在 **agent 私有根之外** —— agent 的 shell 能读 agent 私有根里的
+ * //    文件，目录放进去就等于把（哪怕是密文的）凭据放进了 agent 可达范围。
+ * val store = CredentialStore(dir = File(filesDir, "credentials"), cipher = CredentialCipherLoader.resolve())
  * store.save("deepseek", "https://api.deepseek.com", apiKeyFromUserInput)
  *
  * // 发请求时：明文只活到生成 header 的那一瞬

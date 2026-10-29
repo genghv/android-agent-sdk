@@ -196,6 +196,47 @@ class CredentialStoreTest {
         assertFailsWith<CredentialException> { store().authFor("没有这个", "https://api.deepseek.com/v1") }
     }
 
+    // ================= host 绑定：fail-closed =================
+
+    @Test
+    fun `baseUrl 取不出 host 时 authFor 拒绝建客户端`() {
+        val s = store()
+        s.save("deepseek", "api.deepseek.com", "sk-abc123")
+
+        // ⚠️ 这条守的是「**比不出来就不放行**」：旧实现是
+        //    「两个 host 都取得到才比」⇒ 有一个取不到就**整个跳过比对** = 放行。
+        for (bad in listOf("", "   ", "https://", "https://?x=1")) {
+            assertFailsWith<CredentialException>("baseUrl=$bad 应该被拒") {
+                s.authFor("deepseek", bad)
+            }
+        }
+    }
+
+    @Test
+    fun `登记的 host 取不出来时 authFor 拒绝建客户端`() {
+        val s = store()
+        // 登记了一个**解析不出 host** 的目标（配置写坏了）。
+        s.save("deepseek", "???", "sk-abc123")
+
+        val e = assertFailsWith<CredentialException> {
+            s.authFor("deepseek", "https://api.deepseek.com/v1")
+        }
+        assertTrue(e.message!!.contains("取不出来"), "要说清是「取不出 host」：${e.message}")
+    }
+
+    @Test
+    fun `拒绝时的信息不回显 baseUrl 里的口令`() {
+        val s = store()
+        s.save("deepseek", "api.deepseek.com", "sk-abc123")
+
+        // URL 的 userinfo 里可能带口令（`https://user:口令@host`）⇒
+        // 异常信息会进日志/转录 ⇒ **不许回显 baseUrl**。
+        val e = assertFailsWith<CredentialException> {
+            s.authFor("deepseek", "https://user:s3cr3t@")
+        }
+        assertFalse(e.message!!.contains("s3cr3t"), "异常信息不许回显 URL 里的口令：${e.message}")
+    }
+
     // ================= 解不开就失败 =================
 
     @Test

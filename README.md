@@ -196,10 +196,10 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningWireTest.kt` | **思考强度的线格式**（9 条）：网关形状发 `reasoning_strength`（默认，既有调用方零影响）/ **DeepSeek 形状只发 `thinking`、绝不发 `reasoning_strength`** / **OpenAI 形状只发 `reasoning_effort`** / 取上限内最高的已知档（只向下）/ 强度没设就什么都不发 / `deepSeek` 工厂按地址自动选形状 / 宿主的 `extra` 仍然最后生效 |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningContentPassthroughTest.kt` | **思维链回传**（8 条）：**带 tools 的请求里，历史中每一条 assistant 的思维链都要回传** —— **包括模型那一回合没调工具的**（漏了上游 400）/ 纯文本回合的思维链**照旧要带** / 没有思维链就不带这个字段 / 空串不算「有」/ **线格式与归档那份同一口径**（不会出现「归档里有、回传没了」） |
 
-| `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialStoreTest.kt` | **凭据加密存储**（39 条）：**磁盘上没有明文**（连明文的 base64 都没有）/ **host 绑定**（key 只能发给登记它的那个 host）/ **解不开就抛异常**（密文被改、被换名、没有实现）/ **路径穿越被挡**（凭据名白名单）/ **迁移先写新、校验不过就保留旧文件** / **命令面永远不吐明文**（没有取值子命令）/ **没有加密实现就安全失败**（绝不退回明文） |
+| `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialStoreTest.kt` | **凭据加密存储**（42 条）：**磁盘上没有明文**（连明文的 base64 都没有）/ **host 绑定**（key 只能发给登记它的那个 host）/ **比不出 host 就拒**（fail-closed，不因为「比不了」就放行）/ **解不开就抛异常**（密文被改、被换名、没有实现）/ **路径穿越被挡**（凭据名白名单）/ **迁移先写新、校验不过就保留旧文件** / **命令面永远不吐明文**（没有取值子命令）/ **没有加密实现就安全失败**（绝不退回明文） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/credential/Base64CodecTest.kt` | **自带的那份 base64**（8 条）：与 RFC 4648 标准向量**逐字一致** / 全部 256 个字节值往返 / **解码严格**（长度不对 / 非法字符 / 填充位置不对一律抛，**绝不尽力解一半**）—— ⚠️ 不能用 `java.util.Base64`：它是 **API 26** 才有的，而本 SDK `minSdk = 24` |
 
-> 当前全量：**sdk-core 345 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
+> 当前全量：**sdk-core 348 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
 > **0 跳过、0 失败、0 错误**。
 
 > 交付包原本的自测是一份手工 `main()`（`selftest/SelfTest.kt`），需要 661MB 的 `.toolchain/`
@@ -832,7 +832,7 @@ val auth = store.authFor("deepseek", "https://api.deepseek.com/v1")
 |---|---|
 | **磁盘上只有密文** | 明文只在两个瞬间存在：宿主写进来那一刻、生成请求头的那一瞬 |
 | **解不开就抛异常** | 绝不回退明文、绝不返回空串 —— 回退 = 加密没做，白忙 |
-| **key 绑死目标 host** | 否则 agent 能诱导 App 把 key 发到别处；**建客户端时就拒**，不等到发请求 |
+| **key 绑死目标 host** | 否则 agent 能诱导 App 把 key 发到别处；**建客户端时就拒**，不等到发请求。⚠️ **取不出 host 也拒**（比不出来 = 不通过，不是放行） |
 | **命令面永远不吐明文** | `agent-cred` 只有 `list` / `status`，**没有取值子命令** —— 命令的参数会进模型上下文 |
 
 **加密核心是闭源的**（Keystore 包裹 + AES-256-GCM，预编译产物单独分发）。

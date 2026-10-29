@@ -163,6 +163,8 @@ class CredentialStore(
      *
      * - **host 必须对得上**：凭据登记的 host 与 [baseUrl] 的 host 不一致 ⇒
      *   **当场抛异常**（fail-closed，在建客户端时就拒，不等到发请求）。
+     * - **取不出 host 也拒**（⚠️ fail-closed）：`baseUrl` 或登记的 host **解析不出 host** ⇒
+     *   **同样当场抛异常**。安全检查**取不到结果就当不通过**，绝不「比不了就放行」。
      * - **明文用完即弃**：[LlmAuth.bearerDynamic] 每次请求现取现用，
      *   明文只活到生成 header 的那一瞬，**不进任何字段**。
      * - **解不开就失败**：解密抛异常 ⇒ 请求**发不出去**（不会带着空 token 去问上游）。
@@ -170,9 +172,19 @@ class CredentialStore(
     fun authFor(name: String, baseUrl: String): LlmAuth {
         val safeName = requireName(name)
         val bound = hostOf(safeName) ?: throw CredentialException("凭据不存在：$safeName")
-        val want = hostOfUrl(baseUrl)
-        val have = hostOfUrl(bound)
-        if (want != null && have != null && want != have) {
+        // ⚠️ fail-closed：host 比不出来 ⇒ 当作「比不过」⇒ 拒。
+        //    （旧写法是「两个 host 都取得到才比」⇒ 有一个取不到就**整个跳过比对**，
+        //      等于放行 —— 那是一条安全检查被绕过。）
+        //    异常信息里**不回显 baseUrl**：URL 里可能带 userinfo（user:口令@host）。
+        val want = hostOfUrl(baseUrl) ?: throw CredentialException(
+            "取不出 baseUrl 的 host ⇒ 没法确认凭据「$safeName」能发给谁，拒绝建客户端" +
+                "（host 绑定是安全检查，取不到结果就当不通过）"
+        )
+        val have = hostOfUrl(bound) ?: throw CredentialException(
+            "凭据「$safeName」登记的目标 host 取不出来 ⇒ 没法确认它能发给谁，拒绝建客户端" +
+                "（host 绑定是安全检查，取不到结果就当不通过）"
+        )
+        if (want != have) {
             throw CredentialException(
                 "凭据「$safeName」只允许发给 $have，不能发给 $want" +
                     "（host 绑定 —— 否则 key 可能被发到别处）"

@@ -26,7 +26,8 @@ import kotlin.test.assertTrue
  * - assistant 的 `content` 必须是字符串，给 null 有些网关直接拒；
  *   「只有思考、既无正文又无 tool_calls」的回合，live API 会 400
  *   （`content or tool_calls must be set`），而消息在会话日志里，一坏就带崩后面每一轮。
- * - 带 tool_calls 的回合必须回传 `reasoning_content`，否则思考链断掉。
+ * - **带 tools 的请求里，历史中每一条 assistant 的 `reasoning_content` 都要回传**
+ *   （**包括模型那一回合没调工具的**），否则上游 400。
  * - tool 消息的 content 不能是空串。
  * - 生产链路全程 `stream: true`，非流式是没验过的路径。
  */
@@ -55,10 +56,23 @@ class WireFormatTest {
     }
 
     @Test
-    fun `assistant 纯文本回合不带 reasoning_content`() {
-        // 官方规则：纯文本回合回传 CoT 没用还费 token，所以不带。
-        val j = AssistantMessage(content = "答完了", reasoningContent = "多余的思考").toJson()
-        assertTrue(j["reasoning_content"] == null, "wire: 纯文本回合不带 reasoning_content")
+    fun `assistant 纯文本回合也要回传 reasoning_content`() {
+        // ⚠️ **这条改过**（v1.1.7）：旧版断言「纯文本回合不带 reasoning_content」，
+        // 理由是「回传没用还费 token」—— 那是我们早前对厂商规则的**误读**。
+        //
+        // 厂商规则（官方口径）：**只要这次请求带 tools**，历史里**每一条 assistant**
+        // 的 `reasoning_content` 都要原样回传 —— **包括模型那一回合没调工具的**；
+        // 漏回传 ⇒ 上游 **400**
+        // （`The reasoning_content in the thinking mode must be passed back to the API`）。
+        //
+        // 不带 tools 的请求回传它**无害**（上游会忽略、不拼进上下文）
+        // ⇒ 判据是「**请求**带不带 tools」，**不是**「**这条 assistant** 带没带 tool_calls」。
+        // 混了就会漏掉「模型先答了一段文字、下一轮才调工具」这个最常见的形状。
+        val j = AssistantMessage(content = "答完了", reasoningContent = "这一轮的思考").toJson()
+        assertTrue(
+            j["reasoning_content"]?.jsonPrimitive?.content == "这一轮的思考",
+            "wire: 纯文本回合的思维链也要回传（带 tools 的请求里漏了会 400）",
+        )
     }
 
     @Test

@@ -53,8 +53,20 @@ data class AssistantMessage(
     /**
      * 思考模式下的思维链（deepseek `reasoning_content`）。
      *
-     * 官方规则：**带 tool_calls 的回合必须把它回传**，否则思考链断掉；
-     * 纯文本回合回传它没用还费 token，所以不带。
+     * ## 官方规则：**带 tools 的请求，历史里每一条 assistant 的思维链都要回传**
+     *
+     * —— 包括**模型那一回合没有调工具**的回合。漏回传 ⇒ 上游 **400**
+     * （`The reasoning_content in the thinking mode must be passed back to the API`）。
+     *
+     * ⚠️ 判据是「**这次请求带不带 tools**」，**不是**「这条 assistant 带没带 tool_calls」——
+     * 这两件事不一样，混了就会漏掉「模型先答了一段文字、下一轮才调工具」这种最常见的会话形状。
+     *
+     * ## 为什么「有就带」而不是「按需带」
+     *
+     * **不带 tools 的请求回传思维链是无害的**（上游会忽略、不拼进上下文）；
+     * 而漏带是要 400 的 ⇒ **宁可多带，不可漏带**。
+     * 附带好处：线格式与归档那份（[ChatMessageCodec]）**保持一致**，不会出现
+     * 「归档里有思维链、回传时没了」这种两套口径。
      */
     val reasoningContent: String? = null,
     /**
@@ -88,8 +100,13 @@ data class AssistantMessage(
         put("content", content ?: "")
         if (toolCalls.isNotEmpty()) {
             put("tool_calls", buildJsonArray { toolCalls.forEach { add(it.toJson()) } })
-            reasoningContent?.let { put("reasoning_content", it) }
         }
+        // ★ 思维链**只要有就回传** —— 不管这条 assistant 带没带 tool_calls。
+        //   上游的判据是「**请求**带不带 tools」，不是「**这条消息**带没带 tool_calls」
+        //   （见 [reasoningContent] 的说明）：按后者判断会漏掉
+        //   「模型先答了一段文字、下一轮才调工具」这种形状 ⇒ 上游 400。
+        //   空串/纯空白不算「有」—— 解析层已经把空思维链归一成 null（见 BlockAssembler.reasoning）。
+        reasoningContent?.takeIf { it.isNotBlank() }?.let { put("reasoning_content", it) }
     }
 }
 

@@ -135,22 +135,14 @@ class ChatCompletionsClient(
     /** 非流式：一次性拿到整块 JSON。 */
     suspend fun completeNonStreaming(request: ChatRequest): AssistantMessage {
         val body = buildBody(request, stream = false)
-        val resp = transport.post(
-            url = "$baseUrl$chatPath",
-            headers = headers(accept = "application/json"),
-            body = body,
-        )
+        val resp = post(request, body, accept = "application/json")
         return parseAssistant(resp)
     }
 
     /** 流式：把 SSE 分片经 BlockAssembler 聚合后再返回（arguments 必须聚合才完整）。 */
     suspend fun completeStreaming(request: ChatRequest): AssistantMessage {
         val body = buildBody(request, stream = true)
-        val raw = transport.post(
-            url = "$baseUrl$chatPath",
-            headers = headers(accept = "text/event-stream"),
-            body = body,
-        )
+        val raw = post(request, body, accept = "text/event-stream")
         // 有些服务端不理会 stream:true，仍回一整块 JSON。
         // 那不能当成「一条没有内容的流」—— 那样会静默丢掉模型说的话。
         if (!looksLikeSse(raw)) return parseAssistant(raw)
@@ -173,6 +165,55 @@ class ChatCompletionsClient(
             "Content-Type" to "application/json",
             "Accept" to accept,
         ) + auth.headers() + extraHeaders
+
+    /**
+     * 发请求；**上游报错时补上请求形状**。
+     *
+     * ## 为什么要有形状摘要
+     *
+     * 上游 400 时，日志里只有厂商那句话（`The reasoning_content in the thinking mode
+     * must be passed back to the API`）—— **看不出我们这次到底发了什么形状**，
+     * 于是只能靠猜「是我们漏带了、还是上游的问题、还是历史里本来就没有」。
+     *
+     * 附上形状（消息数 / assistant 条数 / 带思维链条数 / 带工具调用条数 / 工具结果条数 /
+     * 本次带不带 tools / 思维链总字符数）之后，**下次复发能直接对形状**，不用再靠猜。
+     *
+     * ⚠️ **只记数量与布尔**：正文、工具参数、思维链内容**一个字都不进这里**
+     * （思维链只记**总字符数** —— 那是尺寸，不是内容）。
+     *
+     * ## 为什么保留原异常类型
+     *
+     * 两个传输实现都用 `error(...)` ⇒ 上游 HTTP 错误是 [IllegalStateException]。
+     * 这里**换回同类型**（原消息原样留在前缀里），宿主的 `catch` 与日志匹配都不受影响。
+     * 其它异常类型（IO / 超时）**原样抛出**，不做包装。
+     */
+    private suspend fun post(request: ChatRequest, body: String, accept: String): String =
+        try {
+            transport.post(
+                url = "$baseUrl$chatPath",
+                headers = headers(accept),
+                body = body,
+            )
+        } catch (e: IllegalStateException) {
+            throw IllegalStateException(
+                "${e.message}\n请求形状：${shapeSummary(request)}",
+                e,
+            )
+        }
+
+    /** 请求形状摘要（**只有数量与布尔**）。 */
+    private fun shapeSummary(request: ChatRequest): String {
+        val msgs = request.messages
+        val assistants = msgs.filterIsInstance<AssistantMessage>()
+        val withReasoning = assistants.count { !it.reasoningContent.isNullOrBlank() }
+        val withToolCalls = assistants.count { it.toolCalls.isNotEmpty() }
+        val toolResults = msgs.count { it.role == "tool" }
+        val reasoningChars = assistants.sumOf { it.reasoningContent?.length ?: 0 }
+        return "消息 ${msgs.size} · assistant ${assistants.size} · 带思维链 $withReasoning" +
+            " · 带工具调用 $withToolCalls · 工具结果 $toolResults" +
+            " · tools ${if (request.tools.isNotEmpty()) "有" else "无"}" +
+            " · 思维链总字符 $reasoningChars"
+    }
 
     private fun looksLikeSse(raw: String): Boolean =
         raw.lineSequence().any { it.trimStart().startsWith("data:") }
@@ -210,7 +251,9 @@ class ChatCompletionsClient(
         val msg = choice["message"]?.jsonObject ?: error("响应缺少 message: ${resp.take(500)}")
         val content = msg["content"]?.jsonPrimitive?.contentOrNull
         val calls = msg["tool_calls"]?.jsonArray?.map { ToolCall.fromJson(it.jsonObject) } ?: emptyList()
-        // 思考模式的思维链：带 tool_calls 的回合必须原样回传，否则思考链断掉。
+        // 思考模式的思维链：**有就解析**（回不回调传是线格式那一层的事，见 [AssistantMessage.toJson]）。
+        // ⚠️ 官方规则是「**带 tools 的请求**里，历史中**每一条 assistant** 的思维链都要原样回传」
+        //    —— 判据是「**请求**带不带 tools」，不是「**这条 assistant** 带没带 tool_calls」。
         val reasoning = msg["reasoning_content"]?.jsonPrimitive?.contentOrNull
         // 结束原因：'length' = 被 max_tokens 截断，内容不完整（别把半句当完整回答）。
         val finish = choice["finish_reason"]?.jsonPrimitive?.contentOrNull

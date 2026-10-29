@@ -17,3 +17,7 @@ local.properties
 #   它以 Release 附件的形式单独分发，不进 git 历史。
 #   取法与许可义务见 bootstrap/README.md。
 *.zip
+
+# 闭源产物解出来的 classes.jar（由 scripts/verify-cipher-contract.ps1 生成）。
+# ⚠️ 它是**闭源实现**的字节 ⇒ 绝不能进仓库（仓库里只留契约，不留实现）。
+cipher-contract-test/libs/

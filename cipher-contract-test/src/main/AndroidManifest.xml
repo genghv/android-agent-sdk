@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  这个模块**没有实现**，只有一个测试源集（契约测试）。
+  manifest 只是 AGP 的必需文件，没有别的用途。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

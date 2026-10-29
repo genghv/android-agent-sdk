@@ -13,6 +13,16 @@
 *.bat -text
 *.cmd -text
 
+# PowerShell scripts also stay VERBATIM (not normalized to LF), for two reasons:
+#   1. They contain Chinese text, so they need a UTF-8 BOM -- otherwise
+#      PowerShell 5.1 decodes them with the system ANSI code page (GBK here)
+#      and mangles the text. The BOM is part of the file, so it must not be
+#      rewritten by a checkout either.
+#   2. Keeping them verbatim makes the release zip byte-identical to the repo
+#      blobs, so the published package can be checked against the repo with a
+#      plain sha1 comparison -- zero differences, no exceptions.
+*.ps1 -text
+
 # Binary payloads (not tracked today, but be explicit).
 *.zip binary
 *.jar binary

@@ -2,6 +2,7 @@ package ai.agentkernel.credential
 
 import java.io.File
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
@@ -131,7 +132,6 @@ class CredentialPathGuardTest {
             "接入指南.md",
             "打包说明.md",
             "凭据加密模块规格.md",
-            "bootstrap/README.md",
             "skills/agent-data-api/SKILL.md",
             "skills/agent-memory/SKILL.md",
             "skills/agent-scheduling/SKILL.md",
@@ -139,6 +139,26 @@ class CredentialPathGuardTest {
             "skills/agent-workspace/SKILL.md",
             "skills/android-capability/SKILL.md",
         )
+
+        /**
+         * ★★ v1.1.15 修正：**这份清单不能钉死 `bootstrap/README.md`**。
+         *   打包规则**排除 `bootstrap/`**（bootstrap 载荷作为**独立 release asset**
+         *   分发，不进 SDK 主包）⇒ **发布包里根本没有**那份文档。
+         *   而 v1.1.14 把它钉进了必备清单 ⇒ **发布包自己跑 `gradlew build` 会失败**
+         *   （实测：L2 在解包后的发布包里构建失败；L1 在**暂存树**上构建所以没抓到）。
+         *   ⇒ 拆成两档：随包发布的（[EXPECTED_DOCS]）+ 载荷里的（[BOOTSTRAP_DOCS]）。
+         */
+        val BOOTSTRAP_DOCS = listOf("bootstrap/README.md")
+
+        /**
+         * 这一份检出里**必须**被扫到的文档清单。
+         *
+         * @param hasBootstrapPayload 这次检出里**有没有** bootstrap 载荷目录。
+         *   判据是**产物形态**（目录在不在），不是「我以为它在」——
+         *   前者决定**该不该要求**，后者决定**要求哪个**，两件事分开。
+         */
+        fun expectedDocs(hasBootstrapPayload: Boolean): List<String> =
+            EXPECTED_DOCS + if (hasBootstrapPayload) BOOTSTRAP_DOCS else emptyList()
 
         /**
          * 仓库里所有 `.md`（**递归**），排除构建产物与工具目录。
@@ -184,14 +204,15 @@ class CredentialPathGuardTest {
         assertTrue(File(moduleDir, "src/test/kotlin").exists(), "sdk-core 测试目录不见了 —— 门禁路径算错了")
 
         val hits = mutableListOf<Hit>()
-        var scanned = 0
+        var scannedKt = 0
+        var scannedMd = 0
 
         for (dir in targets) {
             val files = collectFiles(dir)
             for (f in files) {
                 if (!f.name.endsWith(".kt")) continue
                 if (f.name == SELF_FILE) continue   // 门禁不扫自己（见 SELF_FILE 的说明）
-                scanned++
+                scannedKt++
                 val label = relativeLabel(repoRoot, f)
                 hits += scanKotlin(label, f.readText(Charsets.UTF_8))
             }
@@ -203,22 +224,28 @@ class CredentialPathGuardTest {
             val md = collectMarkdown(repoRoot)
             val scannedLabels = mutableListOf<String>()
             for (f in md) {
-                scanned++
+                scannedMd++
                 val label = relativeLabel(repoRoot, f)
                 scannedLabels += label
                 hits += scanMarkdown(label, f.readText(Charsets.UTF_8))
             }
+            // ★ 必备清单**跟着产物形态走**：bootstrap 载荷在 ⇒ 要求扫到它；不在 ⇒ 不要求。
+            //   （发布包不含 bootstrap/ —— 它作为独立 release asset 分发。）
+            val expected = expectedDocs(File(repoRoot, "bootstrap").isDirectory)
             // ★ 断言**预期被扫到的文档清单**在场：「扫到 > 0 个」挡不住「扫的不是该扫的那批」。
-            val missing = EXPECTED_DOCS.filter { it !in scannedLabels }
+            val missing = expected.filter { it !in scannedLabels }
             assertTrue(
                 missing.isEmpty(),
                 "这些文档**没有被扫到**（门禁的路径算错了 / 文件被删了）：\n" +
                     missing.joinToString("\n") { "  $it" },
             )
-            assertTrue(scanned >= EXPECTED_DOCS.size, "扫到的文档比预期清单还少 —— 门禁就是空转（比没有更坏）")
+            // ★ 比的是**文档数**，不是「扫到的总文件数」。
+            //   原来写的是 `scanned >= EXPECTED_DOCS.size`，而 scanned 把 .kt 也算进去了
+            //   ⇒ 一个 .kt 都没扫到也照样满足 ⇒ 这条断言**是空的**（看着在咬人，其实不咬）。
+            assertTrue(scannedMd >= expected.size, "扫到的文档比预期清单还少 —— 门禁就是空转（比没有更坏）")
         }
 
-        assertTrue(scanned > 0, "一个文件都没扫到 —— 门禁就是空转（比没有更坏）")
+        assertTrue(scannedKt + scannedMd > 0, "一个文件都没扫到 —— 门禁就是空转（比没有更坏）")
         if (hits.isNotEmpty()) {
             fail(
                 "凭据目录示例落在 agent 私有根里（agent 的 shell 能读那个根 ⇒ 加密白做）：\n" +
@@ -283,5 +310,41 @@ class CredentialPathGuardTest {
         """.trimMargin()
         val hits = scanMarkdown("接入指南.md", md)
         assertTrue(hits.size == 1, "代码块里的错误示例必须被判违规：$hits")
+    }
+
+    // ================= 必备清单跟着**产物形态**走 =================
+
+    @Test
+    fun `发布包形态不该要求bootstrap文档`() {
+        // ★ 发布包**不含** bootstrap/（载荷作为**独立 release asset** 分发）
+        //   ⇒ 清单里要求它 ⇒ **发布包自己跑 gradlew build 会失败**（v1.1.14 实测过）。
+        val expected = expectedDocs(hasBootstrapPayload = false)
+        assertTrue(
+            !expected.contains("bootstrap/README.md"),
+            "包形态没有 bootstrap 载荷 ⇒ 不该要求扫到它",
+        )
+        assertEquals(10, expected.size, "随包发布的那份文档是这 10 份")
+    }
+
+    @Test
+    fun `仓库检出态要求bootstrap文档`() {
+        // ★ 检出态**有** bootstrap/ ⇒ 那份文档必须被扫到（覆盖缺口不能再回来）。
+        val expected = expectedDocs(hasBootstrapPayload = true)
+        assertTrue(
+            expected.contains("bootstrap/README.md"),
+            "检出态有 bootstrap 载荷 ⇒ 必须要求扫到它",
+        )
+        assertEquals(11, expected.size, "检出态 = 随包那 10 份 + bootstrap 那 1 份")
+    }
+
+    @Test
+    fun `必备清单里的文档在仓库里都得存在`() {
+        // 清单里写了一个**改名/删除**的文档名 ⇒ 门禁必然失败 ⇒ 那时该改清单，不是绕过门禁。
+        val moduleDir = File("").absoluteFile
+        val repoRoot = moduleDir.parentFile
+        if (!File(repoRoot, "settings.gradle.kts").exists()) return   // 不是仓库检出态，跳过
+        for (doc in EXPECTED_DOCS) {
+            assertTrue(File(repoRoot, doc).exists(), "清单里的文档不存在：$doc")
+        }
     }
 }

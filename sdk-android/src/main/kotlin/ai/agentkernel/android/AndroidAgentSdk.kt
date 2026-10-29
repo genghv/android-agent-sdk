@@ -4,6 +4,8 @@ import ai.agentkernel.android.shizuku.NoopShizukuBridge
 import ai.agentkernel.android.shizuku.ShizukuBridge
 import ai.agentkernel.archive.ArchiveStore
 import ai.agentkernel.context.ContextInspector
+import ai.agentkernel.credential.AgentCredentialCapabilities
+import ai.agentkernel.credential.CredentialStore
 import ai.agentkernel.device.DeviceCapabilityRegistry
 import ai.agentkernel.kernel.AgentKernel
 import ai.agentkernel.kernel.KernelEvent
@@ -623,6 +625,14 @@ class AndroidAgentSdk(
         const val ARCHIVE_DIR = "archive"
 
         /**
+         * 凭据目录（在 **filesDir 下、agent 私有根之外**）：`<filesDir>/credentials/`。
+         *
+         * ★ **故意不放进 agent 私有根**：agent 的 shell 能读那个根里的文件，
+         * 凭据目录放到外面 ⇒ 连密文文件都读不到（双保险：读不到 + 解不开）。
+         */
+        const val CREDENTIAL_DIR = "credentials"
+
+        /**
          * 打开会话归档仓库（`<filesDir>/agent/var/archive/`）。
          *
          * 宿主/前端自己开一个，用来翻历史 —— 和 SDK 内部写的**是同一份文件**
@@ -679,6 +689,61 @@ class AndroidAgentSdk(
          */
         fun textCapabilities(context: Context): AgentTextCapabilities =
             AgentTextCapabilities(File(PrefixLayout(context.filesDir.path).agentRoot))
+
+        /**
+         * 凭据仓库（第三方 API key 的**加密**存储）—— 宿主组装能力表时用这个。
+         *
+         * ## 它解决什么
+         *
+         * 设备上存着用户的第三方模型 API key（`api_key`）。**明文落盘 = 泄给模型** ——
+         * 我们的 agent 内置 shell 工具、能读 App 私有目录 ⇒ 一次 `cat` 就把 key 读进上下文
+         * ⇒ 泄露给上游模型服务商、会话历史、用量日志。
+         *
+         * ⇒ 磁盘上只留**密文**，解密在 HTTP 层发生，明文只活到生成请求头的那一瞬。
+         *
+         * ## 加密实现在哪
+         *
+         * 加密核心（Keystore 包裹 + AES-256-GCM）是**闭源**的，以预编译产物单独分发；
+         * 本 SDK 只留**接口 + 加载器**。宿主拿到那个产物后注册它：
+         *
+         * ```
+         * CredentialCipherLoader.register("com.example.KeystoreCredentialCipher")
+         * ```
+         *
+         * ★ **没注册 ⇒ 安全失败**（读写凭据直接抛异常），**绝不**退回明文。
+         *
+         * ## 目录为什么在 agent 私有根**之外**
+         *
+         * agent 的 shell 能读 agent 私有根里的文件 —— 凭据目录放到外面，
+         * 连**密文**都读不到（密文本身也解不开，这是第二道保险）。
+         *
+         * ```
+         * val store = AndroidAgentSdk.credentialStore(context)
+         * store.save("deepseek", "api.deepseek.com", keyFromUserInput)
+         * val auth = store.authFor("deepseek", "https://api.deepseek.com/v1")
+         * ```
+         */
+        fun credentialStore(context: Context): CredentialStore =
+            CredentialStore(File(context.filesDir, CREDENTIAL_DIR))
+
+        /**
+         * 凭据能力（`agent-cred`）的工厂 —— **只读，永远不吐明文**。
+         *
+         * ```
+         * val caps = DeviceCapabilityRegistry(
+         *     defaultDeviceCapabilities(
+         *         context,
+         *         credential = AndroidAgentSdk.credentialCapabilities(context),
+         *     )
+         * )
+         * ```
+         *
+         * ⚠️ 这条能力**只暴露「有哪些凭据、绑在哪个 host」** ——
+         * 明文读写只走宿主侧 API（[AgentCredentialCapabilities.setSecret] 等），
+         * **不进命令面**（命令的参会进模型上下文）。
+         */
+        fun credentialCapabilities(context: Context): AgentCredentialCapabilities =
+            AgentCredentialCapabilities(credentialStore(context))
 
         /** 会话摘要进前缀时的标题。 */
         private const val SUMMARY_HEADER = "## 之前的对话摘要（压缩后的历史）\n"

@@ -1,5 +1,6 @@
 package ai.agentkernel.android.device
 
+import ai.agentkernel.credential.AgentCredentialCapabilities
 import ai.agentkernel.device.CapabilityFailure
 import ai.agentkernel.device.DeviceCapability
 import ai.agentkernel.device.okJson
@@ -279,6 +280,9 @@ class BatteryCapability(private val context: Context) : DeviceCapability {
  *   ⚠️ **记忆开着才注册**：宿主没启用记忆（没传 `memoryPolicy`）的话，
  *   agent 写进去的记忆没人读（不会进提示词），纯属白写。
  * @param text 文本文件能力（`agent-text`）。不传就不注册。
+ * @param credential 凭据能力（`agent-cred`）。不传就不注册。
+ *   ⚠️ **只读、且永远不吐明文** —— 它只回答「有哪些凭据、绑在哪个 host」。
+ *   明文读写只走宿主侧 API（`AgentCredentialCapabilities.setSecret` 等）。
  */
 fun defaultDeviceCapabilities(
     context: Context,
@@ -286,6 +290,7 @@ fun defaultDeviceCapabilities(
     http: AgentHttpCapabilities? = null,
     memory: AgentMemoryCapabilities? = null,
     text: AgentTextCapabilities? = null,
+    credential: AgentCredentialCapabilities? = null,
 ): List<DeviceCapability> = buildList {
     // —— 与 Termux:API 逐字对齐的那批 ——
     add(TorchCapability(context))
@@ -299,4 +304,5 @@ fun defaultDeviceCapabilities(
     http?.let { addAll(it.capabilities) }
     memory?.let { addAll(it.capabilities) }
     text?.let { addAll(it.capabilities) }
+    credential?.let { addAll(it.capabilities) }
 }

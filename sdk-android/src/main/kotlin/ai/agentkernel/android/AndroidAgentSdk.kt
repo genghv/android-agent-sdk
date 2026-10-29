@@ -385,7 +385,7 @@ class AndroidAgentSdk(
      *
      * | 字段 | 含义 |
      * |---|---|
-     * | [ContextPlan.toolsChars] | 工具定义段占多少字符（与线上请求体同构） |
+     * | [ContextPlan.toolsChars] | 工具定义段占多少字符（与线上请求体同构；**只取决于工具集**） |
      * | [ContextPlan.estimatedChars] | 这一轮的**估算**总字符数（前缀 + 工具段 + 正文） |
      * | [ContextPlan.overBudget] | 估算是否**仍超** `memoryPolicy.maxContextChars`（只报不压） |
      *
@@ -432,7 +432,7 @@ class AndroidAgentSdk(
      * | [SystemBudget.totalChars] | 这一轮**实际**会发出去多少字符 |
      * | [SystemBudget.over] | 实际超了 ⇒ 网关会截（要处理） |
      * | [SystemBudget.overflow] | **把记忆砍光也装不下** ⇒ 提示词本身太大（要改配置） |
-     * | [SystemBudget.toolsChars] | 工具定义段占多少字符（**不在** system 段里，但同样占请求体） |
+     * | [SystemBudget.toolsChars] | 工具定义段占多少字符（**不在** system 段里，但同样占请求体；**只取决于工具集**） |
      *
      * @param limitChars 网关的 system 段上限；null = 不检查（直连官方 API）。
      */
@@ -942,6 +942,19 @@ class AndroidAgentSdk(
  * @param promptFileTruncated 提示词文件被截断了吗？（true = 内容超了上限，只用了一部分）。
  * @param toolsChars 工具定义段的字符数 —— 与线上请求体**同构**
  *   （它不在 system 段里，但同样占这一轮请求体；线上不带工具时为 0）。
+ *
+ *   ## 这个数量的是**哪一段**
+ *
+ *   量的是**客户端请求体里 `tools` 字段那一段**（`"tools": [...]` 的值）的字符数，
+ *   **含**每个工具外面那层 `{"type":"function","function":{…}}` 包装。
+ *
+ *   ⚠️ **跟服务端的数怎么比**：同一个工具集下，本 SDK 与服务端**归一后**算的是
+ *   **同一个 JSON 字符串**（本 SDK 每个工具项恰好就是 `{type, function:{name, description,
+ *   parameters}}`，不多不少；服务端归一后重建的正是这份）⇒ **两个数必然相等**。
+ *   出现差异只有三种可能：**工具集不同** / 对方**不是本 SDK 客户端**（多塞或少塞字段）/
+ *   **归一规则不同**（换网关）。顺序**不产生**差异（两边都按工具名字典序排）。
+ *   ⚠️ **这个数只取决于工具集、与对话无关** ⇒ 它对上了，**不能**推出
+ *   「两边测的是同一段对话」。
  */
 data class SystemBudget(
     val promptChars: Int,
@@ -956,7 +969,12 @@ data class SystemBudget(
     val reservedSummaryChars: Int = 0,
     /** 提示词文件被截断了吗？（true = 内容超了上限，只用了一部分） */
     val promptFileTruncated: Boolean = false,
-    /** 工具定义段的字符数（与线上请求体同构；线上不带工具时为 0）。 */
+    /**
+     * 工具定义段的字符数（与线上请求体同构；线上不带工具时为 0）。
+     *
+     * 量的是**客户端请求体里 `tools` 字段那一段**、**含** `{"type":"function","function":{…}}` 包装；
+     * 同一组工具下与服务端归一后的那个数**必然相等**（两端算的是同一个字符串）⇒ 详见类注释。
+     */
     val toolsChars: Int = 0,
 ) {
     /** 是否会超限（按**实际**发出的字符数算）。 */

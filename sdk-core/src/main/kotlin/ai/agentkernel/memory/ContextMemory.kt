@@ -403,7 +403,24 @@ data class ContextPlan(
     val archived: MemoryEntry?,
     val archivedSegment: ArchiveSegmentMeta? = null,
     val estimatedChars: Int,
-    /** 工具定义段的字符数 —— 与线上请求体**同构**（见 [toolsSegmentChars]）。 */
+    /**
+     * 工具定义段的字符数 —— 与线上请求体**同构**（见 [toolsSegmentChars]）。
+     *
+     * ## 这个数量的是**哪一段**
+     *
+     * 量的是**客户端请求体里 `tools` 字段那一段**（`"tools": [...]` 的值）的字符数，
+     * **含**每个工具外面那层 `{"type":"function","function":{…}}` 包装
+     * —— 那是线上真实形状的一部分，不是额外开销。
+     *
+     * ⚠️ **跟服务端的数怎么比**：同一个工具集下，本 SDK 与服务端**归一后**算的是
+     *   **同一个 JSON 字符串**（本 SDK 每个工具项恰好就是 `{type, function:{name, description,
+     *   parameters}}`，不多不少；服务端归一后重建的正是这份）⇒ **两个数必然相等**。
+     *   出现差异只有三种可能：**工具集不同** / 对方**不是本 SDK 客户端**（多塞或少塞字段）/
+     *   **归一规则不同**（换网关）。顺序**不产生**差异（两边都按工具名字典序排）。
+     *
+     * ⚠️ **这个数只取决于工具集、与对话无关** —— 同一组工具，每一轮都是同一个数。
+     *   ⇒ 它对上了，**不能**推出「两边测的是同一段对话」（对话段是另一个数）。
+     */
     val toolsChars: Int = 0,
     /**
      * 这一轮的前缀字符数。
@@ -431,6 +448,19 @@ data class ContextPlan(
  * ⚠️ 量法必须与线上**逐字同构**：数组口径把每个 schema 外面那层「`{ }` `,`」都算上了，
  *   逐个 schema 相加会少算分隔符与括号 —— 算出来的数就不是请求体里那一段的数。
  * ⚠️ **不带工具时是 0**：那一轮请求体里**没有** `tools` 字段，不占字符。
+ *
+ * ## 这个数量的是**哪一段**
+ *
+ * 量的是**客户端请求体里 `tools` 字段那一段**（`"tools": [...]` 的值）的字符数，
+ * **含**每个工具外面那层 `{"type":"function","function":{…}}` 包装 —— 那是线上真实形状的一部分。
+ *
+ * ⚠️ **跟服务端的数怎么比**：同一个工具集下，本 SDK 与服务端**归一后**算的是
+ *   **同一个 JSON 字符串**（本 SDK 每个工具项恰好就是 `{type, function:{name, description,
+ *   parameters}}`，不多不少；服务端归一后重建的正是这份）⇒ **两个数必然相等**。
+ *   出现差异只有三种可能：**工具集不同** / 对方**不是本 SDK 客户端**（多塞或少塞字段）/
+ *   **归一规则不同**（换网关）。顺序**不产生**差异（两边都按工具名字典序排）。
+ * ⚠️ **只取决于工具集、与对话无关** —— 同一组工具，每一轮都是同一个数
+ * ⇒ 它对上了，**不能**推出「两边测的是同一段对话」。
  */
 fun toolsSegmentChars(tools: List<JsonObject>): Int =
     if (tools.isEmpty()) 0 else buildJsonArray { tools.forEach { add(it) } }.toString().length

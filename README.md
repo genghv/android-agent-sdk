@@ -199,8 +199,9 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 
 | `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialStoreTest.kt` | **凭据加密存储**（42 条）：**磁盘上没有明文**（连明文的 base64 都没有）/ **host 绑定**（key 只能发给登记它的那个 host）/ **比不出 host 就拒**（fail-closed，不因为「比不了」就放行）/ **解不开就抛异常**（密文被改、被换名、没有实现）/ **路径穿越被挡**（凭据名白名单）/ **迁移先写新、校验不过就保留旧文件** / **命令面永远不吐明文**（没有取值子命令）/ **没有加密实现就安全失败**（绝不退回明文） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/credential/Base64CodecTest.kt` | **自带的那份 base64**（8 条）：与 RFC 4648 标准向量**逐字一致** / 全部 256 个字节值往返 / **解码严格**（长度不对 / 非法字符 / 填充位置不对一律抛，**绝不尽力解一半**）—— ⚠️ 不能用 `java.util.Base64`：它是 **API 26** 才有的，而本 SDK `minSdk = 24` |
+| `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialPathGuardTest.kt` | **门禁：凭据目录的示例路径不许落在 agent 私有根里**（6 条）：扫全仓源码 + 文档代码块，命中即失败（**示例路径属于没人跑过的代码**，照抄就等于把凭据放进 agent 可达范围）/ 规则自己有用例校准（**能逮住那个真实的错误示例**）/ **不误伤**「会话归档仓库本来就在 agent 根里」/ **正文里的反例引用不算违规** |
 
-> 当前全量：**sdk-core 353 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
+> 当前全量：**sdk-core 359 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
 > **0 跳过、0 失败、0 错误**。
 
 > 交付包原本的自测是一份手工 `main()`（`selftest/SelfTest.kt`），需要 661MB 的 `.toolchain/`

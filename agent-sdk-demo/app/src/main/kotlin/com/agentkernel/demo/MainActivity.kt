@@ -101,6 +101,10 @@ class MainActivity : ComponentActivity() {
         // 命令行跑行级补丁自检（agent-memory patch / agent-text patch 真能改一行）：
         //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_patch true
         val autorunPatch = intent?.getBooleanExtra("autorun_patch", false) ?: false
+        // 命令行跑凭据自检（agent-cred 接线：实现可用性 / 写入 / 磁盘无明文 / 往返一致）：
+        //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_cred true
+        //   adb logcat -d -s AgentSdkDemo | Select-String 'CRED\|'
+        val autorunCred = intent?.getBooleanExtra("autorun_cred", false) ?: false
         // 网关配置也能从命令行注入（**运行时**的，token 不进 APK）：
         //   --es gateway_url ... --es gateway_token ... --es gateway_model ...
         // 思考强度用**强度编码**注入（2 的幂：1=关闭思考 2=low 4=medium 8=high 16=max）：
@@ -130,6 +134,7 @@ class MainActivity : ComponentActivity() {
                     autorunArchive,
                     autorunArchivePaging,
                     autorunPatch,
+                    autorunCred,
                 )
             }
         }
@@ -149,13 +154,14 @@ fun DemoApp(
     autorunArchive: Boolean = false,
     autorunArchivePaging: Boolean = false,
     autorunPatch: Boolean = false,
+    autorunCred: Boolean = false,
 ) {
     var tab by remember {
         mutableStateOf(
             when {
                 autorunArchive -> 3
                 !autorunChat.isNullOrBlank() || !autorunChatMulti.isNullOrBlank() -> 2
-                autorunSelfCheck || autorunTorch || autorunMemory || autorunPatch -> 1
+                autorunSelfCheck || autorunTorch || autorunMemory || autorunPatch || autorunCred -> 1
                 else -> 0
             },
         )
@@ -174,12 +180,12 @@ fun DemoApp(
     // 两条路径**互斥**（一次只跑一条），免得并发抢同一个 torch。
     // ★ 一律走 state.start*() —— 它们在 **viewModelScope** 里跑，
     //   activity 重建不会把正在跑的 agent 循环掐断（详见 DemoState.startChatAutorun）。
-    LaunchedEffect(autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory, autorunPatch) {
+    LaunchedEffect(autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory, autorunPatch, autorunCred) {
         android.util.Log.i(
             "AgentSdkDemo",
             "[CHAT] [effect-enter] selfcheck=$autorunSelfCheck torch=$autorunTorch " +
                 "chatLen=${autorunChat?.length} multiLen=${autorunChatMulti?.length} efforts=$autorunEfforts " +
-                "memory=$autorunMemory patch=$autorunPatch",
+                "memory=$autorunMemory patch=$autorunPatch cred=$autorunCred",
         )
         if (autorunTorch) {
             state.startTorchCheck()
@@ -191,6 +197,8 @@ fun DemoApp(
             state.startMemoryCheck()
         } else if (autorunPatch) {
             state.startPatchCheck()
+        } else if (autorunCred) {
+            state.startCredentialCheck()
         } else if (!autorunChatMulti.isNullOrBlank()) {
             // 多轮：用来观察缓存命中率随轮次的上升曲线。
             state.startChatMultiAutorun(

@@ -21,3 +21,7 @@ local.properties
 # 闭源产物解出来的 classes.jar（由 scripts/verify-cipher-contract.ps1 生成）。
 # ⚠️ 它是**闭源实现**的字节 ⇒ 绝不能进仓库（仓库里只留契约，不留实现）。
 cipher-contract-test/libs/
+
+# demo 宿主自己放的闭源加密核心（.aar）。
+# ⚠️ 同上：**闭源字节绝不能进仓库** —— demo 只留「怎么放、放哪、期望指纹是多少」的说明。
+agent-sdk-demo/app/libs/*.aar

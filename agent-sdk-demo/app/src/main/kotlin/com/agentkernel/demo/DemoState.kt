@@ -8,6 +8,7 @@ import ai.agentkernel.android.device.AgentWorkspaceCapabilities
 import ai.agentkernel.android.device.defaultDeviceCapabilities
 import ai.agentkernel.archive.ArchiveSegmentMeta
 import ai.agentkernel.archive.ArchiveStore
+import ai.agentkernel.credential.CredentialCipherLoader
 import ai.agentkernel.device.DeviceCapabilityRegistry
 import ai.agentkernel.kernel.KernelEvent
 import ai.agentkernel.kernel.TurnResult
@@ -139,6 +140,26 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      */
     val textCaps = AndroidAgentSdk.textCapabilities(context)
 
+    /**
+     * 凭据能力（`agent-cred`）：**只读、永远不吐明文**。
+     *
+     * 明文读写只走**宿主侧 API**（`setSecret` / `secretFor` / `deleteSecret`）——
+     * 命令的参数会进模型上下文 ⇒ 写入**绝不做成命令**。
+     */
+    val credCaps = AndroidAgentSdk.credentialCapabilities(context)
+
+    /**
+     * ★ 闭源加密核心的**实现类名**（逐字，一个字都不能改）。
+     *
+     * 闭源产物里的实现类全名 = `com.agentsdk.cipher.KeystoreCredentialCipher`。
+     * 用**类名**注册（而不是直接 new）⇒ demo **不需要编译期依赖**那个闭源产物。
+     *
+     * ⚠️ **没放那个 `.aar` 时**：注册照样成功，但**解析**会失败 ⇒
+     * 读写凭据**安全失败**（抛异常），**绝不**退回明文。
+     * ⇒ 那是「**连不上**」，与「**解不开**」是两种失败 —— 别混为一谈。
+     */
+    private val cipherClassName = "com.agentsdk.cipher.KeystoreCredentialCipher"
+
     /** 能力注册表：与《接入指南》里宿主该用的完全一样。 */
     val capabilities: DeviceCapabilityRegistry = DeviceCapabilityRegistry(
         defaultDeviceCapabilities(
@@ -147,6 +168,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
             http = http,
             memory = memoryCaps,
             text = textCaps,
+            credential = credCaps,
         )
     )
 
@@ -237,6 +259,11 @@ class DemoState(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        // ★ 注册闭源加密实现（**按类名**）。
+        //   没有那个 `.aar` 时这里**照样成功**（注册只是记下类名）；
+        //   真正解析要等到读写凭据时 —— 那时才会**安全失败**（抛异常，不退回明文）。
+        CredentialCipherLoader.register(cipherClassName)
+
         systemPrompt = AndroidAgentSdk.buildSystemPrompt(
             executor = executor,
             capabilities = capabilities,
@@ -1644,6 +1671,155 @@ class DemoState(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * 命令行触发的**凭据**自检（`agent-cred` 接线的验收用）。
+     *
+     * ## 验什么
+     *
+     * | # | 断言 | 说明 |
+     * |---|---|---|
+     * | ① | `cipher-impl` | 实现**注册了没有** ＋ **能不能解析出来** —— 「注册成功」≠「可用」 |
+     * | ② | `cred-write` | 宿主侧 API 写一条**假** key（真 key 绝不进自检） |
+     * | ③ | `cred-no-plaintext` | 扫 `filesDir` 全树，那串假 key **不该出现在任何文件里** |
+     * | ④ | `cred-roundtrip` | 解出来 == 写进去的 ⇒ 往返一致（**不打印明文**） |
+     *
+     * ## 跑两次 = 验「重启后仍读得出」
+     *
+     * **第一次**跑：目录里没有这条凭据 ⇒ 写入（并**留着**）；
+     * **重启 App 后再跑一次**：目录里已经有了 ⇒ **只读**
+     * ⇒ 这就是「Keystore 密钥持久性」的证据（写进去那次的密文，重启后还解得开）；
+     * 验完**删掉**（自检不留痕）。
+     *
+     * ```
+     * adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity \
+     *     --ez autorun_cred true
+     * adb logcat -d -s AgentSdkDemo | Select-String 'CRED\|'
+     * ```
+     */
+    fun startCredentialCheck() {
+        DemoRuntime.startOncePerProcess("credcheck") { runCredentialCheck() }
+    }
+
+    suspend fun runCredentialCheck() {
+        val results = mutableListOf<Pair<String, Boolean>>()
+
+        fun item(name: String, ok: Boolean, detail: String) {
+            results += name to ok
+            logCred(name, ok, detail)
+            checks += CheckItem(
+                title = name,
+                detail = detail,
+                command = "(凭据)",
+                verdict = if (ok) Verdict.PASS else Verdict.FAIL,
+                output = detail,
+                elapsedMs = 0,
+            )
+        }
+
+        val store = AndroidAgentSdk.credentialStore(context)
+        val name = "demo-selftest"
+        val host = "api.deepseek.com"
+        // ★ 假 key：自检**绝不用真 key**（真 key 进了 APK 或日志就是事故）。
+        val plaintext = "sk-demo-selftest-not-a-real-key"
+
+        // ---- 落点（并行核实要用的四项）----
+        logCred(
+            "landing",
+            true,
+            "package=com.agentkernel.demo" +
+                " · 凭据目录=${File(context.filesDir, AndroidAgentSdk.CREDENTIAL_DIR).absolutePath}" +
+                " · agent-cred=**宿主侧接口**（setSecret/secretFor/deleteSecret）＋ 只读命令（list/status）" +
+                " · .aar 来源=release asset android-agent-sdk-cipher-v1.0.0-20261029.aar" +
+                "（期望 sha256=f098744c71d660a4684d7138c437330ef34f19f19ab98c8f7cabd7c1d3644731）",
+        )
+
+        // ---- ① 实现可用性：注册了没有 / 能不能解析出实现 ----
+        val registered = CredentialCipherLoader.isAvailable()
+        val decryptable = store.isDecryptable()
+        val resolved = try {
+            CredentialCipherLoader.resolve()::class.java.name
+        } catch (e: Throwable) {
+            "解析失败：${e.javaClass.simpleName}: ${e.message}"
+        }
+        item(
+            "cipher-impl",
+            registered && decryptable,
+            "registered=$registered · decryptable=$decryptable · 实现类=$resolved",
+        )
+
+        // ---- 第二次跑 = 只读（验「重启后仍读得出」）----
+        val existed = try { store.list().contains(name) } catch (e: Throwable) { false }
+
+        // ---- ② 写入（宿主侧 API；假 key）----
+        if (!existed) {
+            val wrote = try {
+                credCaps.setSecret(name, host, plaintext)
+                "写入成功"
+            } catch (e: Throwable) {
+                "写入失败：${e.javaClass.simpleName}: ${e.message}"
+            }
+            item("cred-write", wrote == "写入成功", wrote)
+        } else {
+            item("cred-write", true, "已存在（这是第二次跑）⇒ 跳过写入，本轮验的是「重启后仍读得出」")
+        }
+
+        // ---- ③ 磁盘上没有明文（扫 filesDir 全树，比只看凭据目录更严）----
+        val marker = plaintext.toByteArray(Charsets.UTF_8)
+        var hits = 0
+        var firstHit = ""
+        fun scan(dir: File) {
+            val kids = dir.listFiles() ?: return
+            for (f in kids) {
+                if (f.isDirectory) {
+                    scan(f)
+                } else {
+                    try {
+                        if (f.readBytes().containsBytes(marker)) {
+                            hits++
+                            if (firstHit.isEmpty()) firstHit = f.absolutePath
+                        }
+                    } catch (_: Throwable) {
+                        // 读不到的文件不算命中 —— 但命中数照样报出来，不藏。
+                    }
+                }
+            }
+        }
+        scan(context.filesDir)
+        item(
+            "cred-no-plaintext",
+            hits == 0,
+            "命中 $hits 处" + (if (firstHit.isEmpty()) "" else "（首个：$firstHit）"),
+        )
+
+        // ---- ④ 读回来（往返一致；**不打印明文**）----
+        var roundTripOk = false
+        var roundTripDetail = ""
+        try {
+            val readBack = credCaps.secretFor(name)
+            roundTripOk = readBack == plaintext
+            roundTripDetail = if (readBack == null) {
+                "读回来是 null（没有这条凭据）"
+            } else if (roundTripOk) {
+                "读回与写入一致（**未打印明文**）"
+            } else {
+                "读回与写入**不一致**（**未打印明文**）"
+            }
+        } catch (e: Throwable) {
+            roundTripDetail = "读取失败：${e.javaClass.simpleName}: ${e.message}"
+        }
+        item("cred-roundtrip", roundTripOk, roundTripDetail)
+
+        // 第二次跑完就清掉：自检不留痕（第一次那份留着，就是为了第二轮能验持久性）。
+        if (existed) {
+            val deleted = try { credCaps.deleteSecret(name) } catch (e: Throwable) { false }
+            item("cred-cleanup", deleted, "已删除自检造的那条凭据=$deleted")
+        }
+
+        val pass = results.count { it.second }
+        val fail = results.size - pass
+        log("SUMMARY", "凭据自检合计 ${results.size} 项：✅ $pass · ❌ $fail")
+    }
+
+    /**
      * 命令行触发的**多轮**对话（自动化用）。
      *
      * ## 为什么必须有多轮
@@ -1785,6 +1961,28 @@ private fun log(tag: String, message: String) {
 private fun logPatch(name: String, ok: Boolean, detail: String) {
     val body = if (ok) "OK | $detail" else "FAIL:$detail"
     android.util.Log.i("AgentSdkDemo", "PATCH|$name=$body")
+}
+
+/**
+ * 凭据自检的一行日志 —— **机器可读**：`CRED|名字=OK` / `CRED|名字=FAIL:原因`。
+ *
+ * 与 [logPatch] 同形但**前缀不同** ⇒ 脚本能只抓凭据那一组。
+ */
+private fun logCred(name: String, ok: Boolean, detail: String) {
+    val body = if (ok) "OK | $detail" else "FAIL:$detail"
+    android.util.Log.i("AgentSdkDemo", "CRED|$name=$body")
+}
+
+/** 这段字节里有没有 [needle]（自检扫「磁盘上有没有明文」用）。 */
+private fun ByteArray.containsBytes(needle: ByteArray): Boolean {
+    if (needle.isEmpty() || needle.size > size) return false
+    outer@ for (i in 0..(size - needle.size)) {
+        for (j in needle.indices) {
+            if (this[i + j] != needle[j]) continue@outer
+        }
+        return true
+    }
+    return false
 }
 
 /**

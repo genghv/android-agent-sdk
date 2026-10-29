@@ -67,4 +67,12 @@ dependencies {
     // ★ 外置接入：按坐标拉 SDK（先在 SDK 工程跑 publishToMavenLocal）。
     //   传递依赖（sdk-core / kotlinx / okhttp）由 POM 自动带过来。
     implementation("ai.agentkernel:sdk-android:1.0.0")
+
+    // ★ 闭源加密核心（**默认不在仓里**）：宿主自己从 release asset 下载，放进 app/libs/。
+    //   用 fileTree（而不是 files("libs/x.aar")）⇒ 文件不在时**构建不报错** ——
+    //   没有实现时 SDK 侧**安全失败**（抛异常，绝不退回明文），不是构建期崩掉。
+    //   ⚠️ 打包规则排除 *.aar ⇒ 这个产物**绝不进 SDK 主包**（闭源产物单独分发）。
+    //   期望指纹：sha256=f098744c71d660a4684d7138c437330ef34f19f19ab98c8f7cabd7c1d3644731
+    //   （= v1.1.15 起各版 release 资产 `android-agent-sdk-cipher-v1.0.0-20261029.aar` 的 digest）
+    implementation(fileTree("libs") { include("*.aar") })
 }

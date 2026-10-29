@@ -12,6 +12,7 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.io.File
 import java.nio.file.Files
 import kotlin.test.Test
@@ -219,14 +220,45 @@ class AgentTextCapabilitiesTest {
         val root = tempDir()
         val outside = tempDir()
         val link = File(root, "link")
-        // 建不出符号链接（Windows 没开开发者模式 / 权限不够）就跳过这一条。
-        val created = runCatching { Files.createSymbolicLink(link.toPath(), outside.toPath()) }.isSuccess
-        if (!created) return
+        // ★ 建不出链接就**显式跳过**，不许「静默当成通过」。
+        //
+        // 早先这里是 `if (!created) return` —— 在建不出符号链接的机器上（Windows 没开开发者模式）
+        // 这条用例**什么都没验**却显示为「通过」⇒ 报告一片绿，那道守卫（canonical 之后
+        // 还在不在沙箱里）却**从没被跑过**。这跟「门禁自己判自己违规」是同一类毛病：
+        // 量具没测到东西，却报了个「已测」。
+        //
+        // 现在两件事都改了：
+        // 1. 用 JUnit 的 assumption —— 跳过会被**记成 skipped**，一眼看得出「这条没验」；
+        // 2. Windows 上退到 **junction**（`mklink /J` 不需要管理员权限），
+        //    canonical 一样能解析出来 ⇒ 这道守卫在 Windows 上也能真验。
+        // ★ JUnit 5 的 assumption 是「条件在前、说明在后」（JUnit 4 是反的）。
+        assumeTrue(createLink(link, outside), "本机建不出符号链接/联接点，跳过这一道")
 
         val cap = capability(root)
         val r = runViaRegistry(cap, "patch", "link/逃逸.md", "replace-lines", "1", "1", "内容")
         assertFalse(r.ok, "符号链接逃逸必须拒绝")
         assertFalse(File(outside, "逃逸.md").exists(), "沙箱外的文件不能被写出来")
+    }
+
+    /**
+     * 建一个指向 [target] 的**目录链接**。
+     *
+     * 两条路：
+     * 1. POSIX 符号链接（`Files.createSymbolicLink`）—— Android / Linux CI 走这条；
+     * 2. Windows **junction**（`mklink /J`）—— 不需要管理员权限。
+     *
+     * 两条都建不出来 ⇒ 返回 false（调用方**显式跳过**，不假装通过）。
+     */
+    private fun createLink(link: File, target: File): Boolean {
+        runCatching { Files.createSymbolicLink(link.toPath(), target.toPath()) }
+            .onSuccess { return true }
+        if (!System.getProperty("os.name").orEmpty().lowercase().contains("win")) return false
+        return runCatching {
+            val p = ProcessBuilder(
+                "cmd.exe", "/c", "mklink", "/J", link.absolutePath, target.absolutePath,
+            ).redirectErrorStream(true).start()
+            p.waitFor() == 0
+        }.getOrDefault(false)
     }
 
     @Test

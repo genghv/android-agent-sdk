@@ -64,8 +64,17 @@ private class TextCapability(
      */
     override val shortUsage: String = "agent-text <read|patch>"
 
-    /** root 的真实路径（解掉符号链接）—— 沙箱校验的基准。 */
-    private val base: File = runCatching { root.canonicalFile }.getOrElse { root.absoluteFile }
+    /**
+     * root 的**真实路径**（解掉了符号链接/联接点）—— 沙箱校验的基准。
+     *
+     * ★ 为什么要「真实路径」而不是 `File.canonicalFile`：
+     *   Windows 的**目录联接点（junction）**不会被 `File.getCanonicalPath()` 解析
+     *   （2026-10-29 实测：canonical 仍是 `root\link\x.md`），
+     *   但 `Path.toRealPath()` 会（实测：解析成沙箱外的真实目录）⇒
+     *   只用 canonicalFile 的话，Windows 上能用 junction 逃出沙箱。
+     */
+    private val base: File = RealPath.of(root)
+        ?: runCatching { root.canonicalFile }.getOrElse { root.absoluteFile }
 
     override fun run(args: List<String>): String {
         val action = args.firstOrNull() ?: throw CapabilityFailure("用法：$usage")
@@ -181,11 +190,19 @@ private class TextCapability(
         if (normalized.split('/').any { it == ".." }) {
             throw CapabilityFailure("路径里不能有 ..（只能访问沙箱根下面的文件）：$rel")
         }
-        val file = File(base, normalized).canonicalFile
-        if (!isInside(file)) {
+        val candidate = File(base, normalized)
+        // ★ 判沙箱要用**解掉了链接/联接点**的真实路径 ——
+        //   canonicalFile 在 Windows 上不解析 junction（实测），拿它判等于没判。
+        //   拿不到真实路径时退回 canonicalFile（Android 上它本来就够用：会解析符号链接）。
+        val real = RealPath.of(candidate)
+            ?: runCatching { candidate.canonicalFile }.getOrElse { candidate.absoluteFile }
+        if (!isInside(real)) {
             throw CapabilityFailure("路径越出了沙箱根（只能访问沙箱根下面的文件）：$rel")
         }
-        return Target(file, file.relativeTo(base).invariantSeparatorsPath)
+        // 给 agent 看的相对路径：算不出来就用它给的那个（只影响显示，不影响沙箱判定）。
+        val shown = runCatching { real.relativeTo(base).invariantSeparatorsPath }
+            .getOrElse { normalized }
+        return Target(real, shown)
     }
 
     /** 绝对路径的几种写法：`/x`、`\x`、`C:\x`、`C:x`（Windows 的盘符在别的平台上也不该给过）。 */
@@ -242,5 +259,101 @@ private class TextCapability(
     /** `C:` / `c:` 开头 —— Windows 的盘符路径（哪怕当前平台不是 Windows 也不该给过）。 */
     private companion object {
         val WINDOWS_DRIVE = Regex("^[A-Za-z]:.*")
+    }
+}
+
+/**
+ * 解出「解掉了符号链接/目录联接点」的**真实路径**。
+ *
+ * ## 为什么用**反射**而不是直接写 `java.nio.file.Path`
+ *
+ * `java.nio.file` 是 **API 26** 才有的（Android 7.x 上根本没这个包），
+ * 而本模块的 minSdk 是 24 ⇒ 直接静态引用会在**类加载期**炸
+ * （`NoClassDefFoundError` —— 不可捕获、不是普通异常，整个功能起不来），
+ * 而且 core library desugaring 救不了它（名单里只有 `java.time` / `java.util.stream` /
+ * `java.util.Optional` / `java.util.function`）。
+ *
+ * ⇒ 这里**反射**调用，静态符号一个都不引用：老系统上反射不到就返回 null，
+ * 调用方退回 `File.getCanonicalPath()` —— 那边是 Android/Linux，
+ * canonicalFile 本来就会解析符号链接，守卫照样成立。
+ *
+ * ## 为什么需要它
+ *
+ * Windows 的**目录联接点（junction）**不会被 `File.getCanonicalPath()` 解析
+ * （2026-10-29 实测：canonical 仍是 `root\link\x.md`），
+ * 而 `Path.toRealPath()` 会（实测：解析成沙箱外的真实目录）
+ * ⇒ 只用 canonicalFile 判沙箱的话，Windows 上能拿一个 junction 逃出沙箱。
+ */
+private object RealPath {
+
+    private val toPathMethod: java.lang.reflect.Method? = runCatching {
+        File::class.java.getMethod("toPath")
+    }.getOrNull()
+
+    /**
+     * `Path.toRealPath(LinkOption...)` —— **变参**方法。
+     *
+     * ★ 坑：`getMethod("toRealPath")`（按零参数找）会抛 `NoSuchMethodException` ——
+     *   变参在反射里就是「一个数组参数」，不是「零个参数」。
+     *   ⇒ 必须按 `LinkOption[]` 这个参数类型去找。
+     *   （2026-10-29 实踩：查不到 ⇒ 静默退回 canonicalFile ⇒ 守卫看着在、其实没生效。）
+     */
+    /**
+     * `java.nio.file.LinkOption` 的 Class（**元素类**，不是数组类）。
+     *
+     * ⚠️ 两个坑都踩过：
+     * 1. `Class.forName("java.nio.file.LinkOption[]")` 找不到（数组类的 binary name 是
+     *    `[Ljava/nio/file/LinkOption;`，`forName` 不吃这种写法）⇒ 改用「造一个空数组」反推。
+     * 2. 造空数组要用**元素类**（`LinkOption`）——
+     *    拿数组类去 `Array.newInstance` 会造出 `LinkOption[][]`，
+     *    反射直接抛 `IllegalArgumentException: argument type mismatch`，
+     *    而它被 `runCatching` 吞掉 ⇒ 静默退回 canonicalFile ⇒ 守卫形同虚设。
+     */
+    private val linkOptionClass: Class<*>? = runCatching {
+        Class.forName("java.nio.file.LinkOption")
+    }.getOrNull()
+
+    /** 数组类（`LinkOption[]`）—— 按参数类型找方法时要用。 */
+    private val linkOptionArrayClass: Class<*>? = linkOptionClass?.let {
+        java.lang.reflect.Array.newInstance(it, 0).javaClass
+    }
+
+    private val toRealPathMethod: java.lang.reflect.Method? = runCatching {
+        val opts = linkOptionArrayClass ?: error("java.nio.file 不可用")
+        Class.forName("java.nio.file.Path").getMethod("toRealPath", opts)
+    }.getOrNull()
+
+    private val toFileMethod: java.lang.reflect.Method? = runCatching {
+        Class.forName("java.nio.file.Path").getMethod("toFile")
+    }.getOrNull()
+
+    /**
+     * 真实路径；**拿不到就返回 null**（调用方退回 canonicalFile）。
+     *
+     * 目标不存在（新建文件）⇒ 解析它**最近的、存在的祖先**，再把剩下的段拼回去
+     * —— 不存在的那几段里不会有链接可藏。
+     */
+    fun of(file: File): File? {
+        val toPath = toPathMethod ?: return null
+        val toRealPath = toRealPathMethod ?: return null
+        val toFile = toFileMethod ?: return null
+        val optsClass = linkOptionClass ?: return null
+        // 变参要传一个**真的空数组**（类型必须是 LinkOption[]，Object[] 会被反射拒掉）。
+        val noOptions = java.lang.reflect.Array.newInstance(optsClass, 0)
+        var cur = file
+        val tail = ArrayDeque<String>()
+        while (true) {
+            val pathObj = runCatching { toPath.invoke(cur) }.getOrNull() ?: return null
+            val realPath = runCatching { toRealPath.invoke(pathObj, noOptions) }.getOrNull()
+            if (realPath != null) {
+                val realFile = runCatching { toFile.invoke(realPath) as File }.getOrNull() ?: return null
+                var out = realFile
+                for (name in tail) out = File(out, name)
+                return out
+            }
+            val parent = cur.parentFile ?: return null
+            tail.addFirst(cur.name)
+            cur = parent
+        }
     }
 }

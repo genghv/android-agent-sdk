@@ -63,12 +63,21 @@ android-agent-sdk/          ← 仓库根（README / LICENSE / NOTICE 都在这�
 ├── sdk-core/               内核（纯 JVM，不依赖 android.*）
 ├── sdk-android/            宿主层（Android library）
 ├── skills/                 agent 技能文档（命令速查 / 工作区 / 记忆 / 数据接口 / 定时）
+├── cipher-contract-test/   闭源加密核心的**契约测试**（公开源码；默认构建不 include）
 ├── agent-sdk-demo/         宿主示例 App（Kotlin + Compose），可独立构建
 ├── bootstrap/README.md     可选的 Termux 运行时说明（载荷是 Release 附件，不进 git）
 ├── 接入指南.md              宿主 App 怎么把这个 SDK 装进去用
 ├── 凭据加密模块规格.md       闭源加密模块的施工图（接口契约 + 七条纪律 + 验收清单）
 └── 打包说明.md              交付包是怎么打的
 ```
+
+> `cipher-contract-test/` 里**没有加密实现**，只有**契约测试**（密文包的格式与 AEAD 语义）。
+> **实现闭源、契约公开** ⇒ 第三方可以对着已发布的 `.aar` 独立复现「契约测试全绿」，
+> 不必只相信我们。一键复现：
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File scripts/verify-cipher-contract.ps1
+> ```
+> （该模块是**条件 include** ⇒ 默认构建既不需要闭源产物、也不受影响。）
 
 **从源码构建**（需要本机有 Android SDK）：
 
@@ -200,9 +209,14 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 | `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialStoreTest.kt` | **凭据加密存储**（42 条）：**磁盘上没有明文**（连明文的 base64 都没有）/ **host 绑定**（key 只能发给登记它的那个 host）/ **比不出 host 就拒**（fail-closed，不因为「比不了」就放行）/ **解不开就抛异常**（密文被改、被换名、没有实现）/ **路径穿越被挡**（凭据名白名单）/ **迁移先写新、校验不过就保留旧文件** / **命令面永远不吐明文**（没有取值子命令）/ **没有加密实现就安全失败**（绝不退回明文） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/credential/Base64CodecTest.kt` | **自带的那份 base64**（8 条）：与 RFC 4648 标准向量**逐字一致** / 全部 256 个字节值往返 / **解码严格**（长度不对 / 非法字符 / 填充位置不对一律抛，**绝不尽力解一半**）—— ⚠️ 不能用 `java.util.Base64`：它是 **API 26** 才有的，而本 SDK `minSdk = 24` |
 | `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialPathGuardTest.kt` | **门禁：凭据目录的示例路径不许落在 agent 私有根里**（6 条）：扫全仓源码 + 文档代码块，命中即失败（**示例路径属于没人跑过的代码**，照抄就等于把凭据放进 agent 可达范围）/ 规则自己有用例校准（**能逮住那个真实的错误示例**）/ **不误伤**「会话归档仓库本来就在 agent 根里」/ **正文里的反例引用不算违规** |
+| `cipher-contract-test/src/test/kotlin/com/agentsdk/cipher/KeystoreCredentialCipherTest.kt` | **闭源加密核心的契约测试**（**12 条**，源码公开，**默认构建不 include**）：密文包格式与**字节偏移**钉死（magic `ASDC` / nonce 段 / 密文体长度 = 明文 + GCM 标签）/ AAD 绑住「凭据名 + 目标 host」（换任一都解不开）/ 改一个字节、改 nonce 段、截断都解不开 / 每次密封换新 nonce / 密文包里搜不到明文 / **每条负向用例先自证基线是好的**（否则包格式整个坏掉时，这一堆负向用例会**照样全绿**）—— 一键复现见 `scripts/verify-cipher-contract.ps1` |
 
-> 当前全量：**sdk-core 359 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
-> **0 跳过、0 失败、0 错误**。
+> 当前全量：**sdk-core 369 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
+> **0 跳过、0 失败、0 错误**（合计 **428 条用例 / 487 次执行**）。
+>
+> ★ 这行数字**必须与实际在跑的那一份一致** —— 它曾陈旧了 **4 个版本**（一直写着 359，
+> 实际从 v1.1.15 起已是 362、v1.1.16 起 369），直到 v1.1.19 才被发现
+> ⇒ **每版发版前重新量一遍，别抄上一版的数字**。
 
 > 交付包原本的自测是一份手工 `main()`（`selftest/SelfTest.kt`），需要 661MB 的 `.toolchain/`
 > 才能跑，且**模型端是 `FakeLlm`** —— 也就是说「真发 HTTP / 真解析 tool_calls /

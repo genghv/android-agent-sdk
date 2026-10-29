@@ -102,6 +102,64 @@ class CredentialPathGuardTest {
          * ⇒ 只豁免这一个文件；别处写错照样被抓。
          */
         const val SELF_FILE = "CredentialPathGuardTest.kt"
+
+        /** 扫文档时跳过的目录（构建产物与工具目录，不是文档）。 */
+        val EXCLUDED_DIRS = setOf("build", ".gradle", ".git", ".kotlin", ".idea", "node_modules")
+
+        /**
+         * ★ **预期必须被扫到的文档清单**（钉死）。
+         *
+         * 2026-10-29（对方指出、逐条核对属实）：这道门禁原来用
+         * `repoRoot.listFiles { … .md }` ⇒ **只扫仓库根级**的 4 份 .md，
+         * 子目录里的 `bootstrap/README.md` + 6 份 `skills` 下的 `SKILL.md`
+         * **从来没被扫过** ⇒ 那是**覆盖缺口**（将来在子目录文档里写错就抓不到）。
+         * ⚠️ 写这段注释时自己踩了两个 Kotlin 的坑，记在这儿免得再犯：
+         *    ① 块注释**可嵌套** —— 在注释里写「斜杠 + 星号」那种路径样子（`skills/…` 里的
+         *    通配写法）会**再开一个注释**，后面的结束符只关掉内层 ⇒ 报「Unclosed comment」；
+         *    ② 注释里**不能出现注释的结束符** —— 哪怕是放在反引号里，也会**当场把注释关掉**，
+         *    后面的字就当代码解析 ⇒ 报「Expecting member declaration」。
+         *
+         * ⇒ 改成**递归**扫全部 .md，并且**断言这份清单在场**：
+         * 「扫到 > 0 个」挡不住「路径算错、只扫到根级那几份」这种**空转**
+         * （扫到了 >0 个，但扫的不是该扫的那批）。
+         *
+         * ★ 清单只要求「**都在**」不要求「**只有**这些」——
+         * 以后新增文档不需要改这里（新增的照样会被扫到）。
+         */
+        val EXPECTED_DOCS = listOf(
+            "README.md",
+            "接入指南.md",
+            "打包说明.md",
+            "凭据加密模块规格.md",
+            "bootstrap/README.md",
+            "skills/agent-data-api/SKILL.md",
+            "skills/agent-memory/SKILL.md",
+            "skills/agent-scheduling/SKILL.md",
+            "skills/agent-text/SKILL.md",
+            "skills/agent-workspace/SKILL.md",
+            "skills/android-capability/SKILL.md",
+        )
+
+        /**
+         * 仓库里所有 `.md`（**递归**），排除构建产物与工具目录。
+         *
+         * 递归是必须的：根级 `listFiles` 只看得到第一层 ⇒ 子目录的文档全漏。
+         */
+        fun collectMarkdown(repoRoot: File): List<File> {
+            val out = mutableListOf<File>()
+            fun walk(dir: File) {
+                dir.listFiles()?.sortedBy { it.name }?.forEach { f ->
+                    if (f.isDirectory) {
+                        if (f.name in EXCLUDED_DIRS) return@forEach
+                        walk(f)
+                    } else if (f.isFile && f.name.endsWith(".md")) {
+                        out.add(f)
+                    }
+                }
+            }
+            walk(repoRoot)
+            return out
+        }
     }
 
     // ================= 门禁本身（扫仓库）=================
@@ -141,12 +199,23 @@ class CredentialPathGuardTest {
 
         // 文档：只在仓库检出态扫（发布成 maven 产物时仓库根不在旁边）。
         if (isCheckout) {
-            val md = repoRoot.listFiles { f -> f.isFile && f.name.endsWith(".md") }?.sortedBy { it.name } ?: emptyList()
-            assertTrue(md.isNotEmpty(), "仓库根一份 .md 都没有 —— 门禁路径算错了")
+            // ★ **递归**扫全部 .md —— 根级 `listFiles` 只看得到第一层（覆盖缺口）。
+            val md = collectMarkdown(repoRoot)
+            val scannedLabels = mutableListOf<String>()
             for (f in md) {
                 scanned++
-                hits += scanMarkdown(relativeLabel(repoRoot, f), f.readText(Charsets.UTF_8))
+                val label = relativeLabel(repoRoot, f)
+                scannedLabels += label
+                hits += scanMarkdown(label, f.readText(Charsets.UTF_8))
             }
+            // ★ 断言**预期被扫到的文档清单**在场：「扫到 > 0 个」挡不住「扫的不是该扫的那批」。
+            val missing = EXPECTED_DOCS.filter { it !in scannedLabels }
+            assertTrue(
+                missing.isEmpty(),
+                "这些文档**没有被扫到**（门禁的路径算错了 / 文件被删了）：\n" +
+                    missing.joinToString("\n") { "  $it" },
+            )
+            assertTrue(scanned >= EXPECTED_DOCS.size, "扫到的文档比预期清单还少 —— 门禁就是空转（比没有更坏）")
         }
 
         assertTrue(scanned > 0, "一个文件都没扫到 —— 门禁就是空转（比没有更坏）")

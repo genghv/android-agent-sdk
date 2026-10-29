@@ -24,7 +24,7 @@ import kotlinx.serialization.json.put
  * | 形状 | 发出去的字段 | 适用 |
  * |---|---|---|
  * | [GATEWAY] | `reasoning_strength` = 整数编码 | 走我们网关（**默认**，现有调用方零影响） |
- * | [DEEPSEEK] | `thinking` = `{"type":"enabled"｜"disabled"}` | DeepSeek 官方（**只有开关，没有档位**） |
+ * | [DEEPSEEK] | `thinking` = `{"type":"enabled"｜"disabled"}` | DeepSeek 官方（**目前只有开关**） |
  * | [OPENAI] | `reasoning_effort` = `"minimal"｜"low"｜"medium"｜"high"` | OpenAI 系（**字符串**档位） |
  *
  * ## 强度编码 → 厂商档位（直连时没有目录，只能用内置表）
@@ -41,8 +41,16 @@ import kotlinx.serialization.json.put
  * | 8（high） | `8` | 同上 | `high` |
  * | 16 / 32（max） | 原样 | 同上 | `high`（OpenAI 最高档就是 high） |
  *
- * ⚠️ **DeepSeek 官方只有开关**（`thinking.type`）⇒ 直连 DeepSeek 时，
- * 「强度上限」这个语义**无法表达** —— 那是**厂商限制**，不是 SDK 能补的。
+ * ⚠️ **DeepSeek 官方目前只有开关**（`thinking.type`）⇒ 直连 DeepSeek 时，
+ * 「强度上限」这个语义**无法表达**。
+ * ⚠️ **准确说法是「未证实厂商支持档位」，不是「厂商限制」**
+ * （实测 2026-10-29，`deepseek-flash` 与 `deepseek-v4-pro`）：
+ * `reasoning_effort` 的四档**全部 200**，但**非法档 `ultra` 也 200** ⇒ 厂商**不校验**它
+ * ⇒ 与「厂商认识并应用」不相容；且各档思维链长度又**全部撞 `max_tokens` 上限**
+ * ⇒ **读不出「档位是否生效」** ⇒ **表现与「静默忽略」一致**
+ * ⇒ SDK **不据此扩能力**（宁可少发一个字段，也不要让用户以为设了、其实没变）。
+ * ⚠️ 另注：官方文档当前示例里 `reasoning_effort` 与 `thinking` **并用** ——
+ * **文档写了 ≠ 厂商真支持**。
  *
  * ## 怎么选
  *

@@ -289,7 +289,8 @@ class CredentialStore(
 
         /**
          * 从一个 URL 里取 host（`https://api.deepseek.com/v1` ⇒ `api.deepseek.com`）。
-         * 拿不出就 null（调用方按「无法比较」处理）。
+         * 拿不出就 null —— ⚠️ 调用方按「**不通过**」处理（**拒绝建客户端**），
+         * **不是**「无法比较就跳过比对」⇒ 那正是 v1.1.8 修掉的那个洞（fail-open）。
          */
         fun hostOfUrl(url: String): String? {
             var s = url.trim()

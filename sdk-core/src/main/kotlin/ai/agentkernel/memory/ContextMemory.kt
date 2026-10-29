@@ -9,6 +9,7 @@ import ai.agentkernel.protocol.SystemMessage
 import ai.agentkernel.protocol.ToolMessage
 import ai.agentkernel.protocol.UserMessage
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
 
 /**
  * 上下文压缩与长期记忆的**编排者** —— 宿主持有它，门面每轮调一次。
@@ -117,13 +118,35 @@ class ContextMemory(
     /**
      * 准备这一轮要发什么。
      *
+     * ## 容量口径：估算的是什么
+     *
+     * [ContextPlan.estimatedChars] = **前缀 + 工具定义段 + 正文**，单位是**字符**。
+     *
+     * | 段 | 怎么算 |
+     * |---|---|
+     * | 前缀 | 宿主给的 [prefixChars]；**压缩之后**按最终形态重算（见 [prefixCharsFor]） |
+     * | 工具定义段 | [toolsSegmentChars] —— 与线上请求体**同构**（同一段字节） |
+     * | 正文 | 历史消息的正文字符数 |
+     *
+     * ⚠️ **字符口径，不是 token 估算**（SDK 没有分词器，就不编一个 token 数）。
+     * ⚠️ **不含** JSON 封装开销与转义开销 —— 真实请求体会比这个数略大。
+     * ⚠️ 这个口径**处处一致**：触发压缩的比较、最终估算、超预算判断，用的都是它。
+     *
      * @param history 宿主持有的会话历史（**包含**本轮用户消息）。
-     * @param prefixChars 本轮稳定前缀大概占多少字符（系统提示词、记忆块……）。
+     * @param prefixChars 本轮稳定前缀的**保证值**（系统提示词、记忆块、摘要位……）。
+     *   会话摘要按**预留位**算 —— 摘要可能这一轮才出现，按现有长度算会低估。
      * @param replayPrefix 要在压缩请求里**逐字重放**的稳定前缀（system 段）。
      *   上一轮摘要就在这里面 —— 它在主请求里本来就是一个 system 段，
      *   所以压缩时原样带上即可，**不要**再往 user 消息里塞一份。
      * @param tools 与主请求**完全相同**的工具定义，原样带给压缩请求
      *   （工具段不一致 = 压缩这次调用不吃上游缓存）。
+     *   同时用来算工具定义段的字符数（见 [toolsSegmentChars]）。
+     * @param prefixCharsFor 压缩之后**重算前缀字符数**的算法：
+     *   入参是压缩产生的**新**会话摘要，返回这一轮**实际**会发出去的前缀字符数。
+     *   压缩把一大段历史换成了一段新摘要 ⇒ 压缩前的 [prefixChars]
+     *   （含旧摘要 / 预留位）不再等于实际前缀长度 ⇒ 必须按最终形态重算。
+     *   默认 = 原样用 [prefixChars]（老行为）；宿主知道自己的前缀怎么拼，
+     *   传这个参数才能把估算对齐到真实请求体。
      * @return 这一轮该怎么发。
      */
     suspend fun prepare(
@@ -131,6 +154,7 @@ class ContextMemory(
         prefixChars: Int = 0,
         replayPrefix: List<ChatMessage> = emptyList(),
         tools: List<JsonObject> = emptyList(),
+        prefixCharsFor: (summary: String?) -> Int = { prefixChars },
     ): ContextPlan {
         val now = clock()
 
@@ -158,12 +182,16 @@ class ContextMemory(
         }
         lastActivityAt = now
 
+        // 工具定义段：真实请求体里有这一段（线上怎么拼的见 [toolsSegmentChars]）。
+        val toolsChars = toolsSegmentChars(tools)
+
         // ② 超容量压缩：把旧历史压成摘要，原文只留最近一段。
         var summary = sessionSummary
         var compacted = false
         if (policy.compressionEnabled && policy.maxContextChars > 0 && working.size > 1) {
             val historyChars = charsOf(working)
-            if (prefixChars + historyChars > policy.maxContextChars) {
+            // ★ 容量口径**包含工具定义段** —— 它是真实请求体的一部分，不能当它不存在。
+            if (prefixChars + toolsChars + historyChars > policy.maxContextChars) {
                 val split = splitIndex(working, policy.keepRecentChars)
                 if (split > 0) {
                     val produced = summarizer.summarize(
@@ -190,13 +218,24 @@ class ContextMemory(
             }
         }
 
+        // ③ 估算：压缩之后按**最终形态**重算。
+        //   压缩前的 prefixChars 还含旧摘要 / 预留位，而压缩把一大段历史换成了新摘要
+        //   ⇒ 拿压缩前的数去加保留下来的历史，估算与实际会脱节（可能高估几百字符）。
+        //   没压缩时仍用保证值（按预留位算）—— 摘要可能下一轮才出现，那个位得留着。
+        val finalPrefixChars = if (compacted) prefixCharsFor(summary) else prefixChars
+        val estimatedChars = finalPrefixChars + toolsChars + charsOf(working)
+
         return ContextPlan(
             history = working,
             summary = summary,
             compacted = compacted,
             archived = archived?.entry,
             archivedSegment = segment,
-            estimatedChars = prefixChars + charsOf(working),
+            estimatedChars = estimatedChars,
+            toolsChars = toolsChars,
+            prefixChars = finalPrefixChars,
+            // ★ 只报不压：压完还超预算要说出来，但**不再压一次**。
+            overBudget = policy.maxContextChars > 0 && estimatedChars > policy.maxContextChars,
         )
     }
 
@@ -337,12 +376,25 @@ private data class SessionArchive(
 /**
  * 这一轮该怎么发（见 [ContextMemory.prepare]）。
  *
+ * ## 容量口径
+ *
+ * [estimatedChars] = [prefixChars] + [toolsChars] + 正文（单位：**字符**）。
+ *
+ * | 字段 | 是什么 |
+ * |---|---|
+ * | [prefixChars] | 这一轮的前缀字符数。**压缩后** = 最终形态（新摘要替掉旧摘要位）；**没压缩** = 保证值（摘要按预留位算） |
+ * | [toolsChars] | 工具定义段的字符数（与线上请求体同构；线上不带工具时为 0） |
+ * | [estimatedChars] | 这一轮请求的**估算**总字符数 |
+ * | [overBudget] | 最终估算是否**仍超** [ContextPolicy.maxContextChars]（只报不压） |
+ *
+ * ⚠️ 估算**不含** JSON 封装开销与转义开销 —— 真实请求体会比它略大。
+ *
  * @param history 实际发给内核的历史（可能已压缩、已归档）。
  * @param summary 要放进**稳定前缀**的会话摘要；null = 没有。
  * @param compacted 历史被改写了吗（改写了宿主就要用 [history] 替换自己那份）。
  * @param archived 本轮归档出来的那条记忆；null = 没归档。
  * @param archivedSegment 本轮落盘的**归档段**（被摘要掉的原文就在这儿）；null = 没有。
- * @param estimatedChars 估算的本次请求总字符数。
+ * @param estimatedChars 估算的本次请求总字符数（前缀 + 工具定义段 + 正文）。
  */
 data class ContextPlan(
     val history: List<ChatMessage>,
@@ -351,4 +403,34 @@ data class ContextPlan(
     val archived: MemoryEntry?,
     val archivedSegment: ArchiveSegmentMeta? = null,
     val estimatedChars: Int,
+    /** 工具定义段的字符数 —— 与线上请求体**同构**（见 [toolsSegmentChars]）。 */
+    val toolsChars: Int = 0,
+    /**
+     * 这一轮的前缀字符数。
+     *
+     * 压缩后 = **最终形态**（新摘要替掉旧摘要位）；没压缩 = 保证值（按预留位算）。
+     */
+    val prefixChars: Int = 0,
+    /** 最终估算是否**仍超** [ContextPolicy.maxContextChars]（只报不压，不再压一次）。 */
+    val overBudget: Boolean = false,
 )
+
+/**
+ * 工具定义段的字符数 —— **与线上请求体同构**的量法。
+ *
+ * ## 线上是怎么序列化工具定义的
+ *
+ * [ai.agentkernel.llm.openai.ChatCompletionsClient] 组装请求体时：
+ * ```
+ * if (request.tools.isNotEmpty()) {
+ *     put("tools", buildJsonArray { request.tools.forEach { add(it) } })
+ * }
+ * ```
+ * ⇒ 这一段的字符数 = `buildJsonArray { tools.forEach { add(it) } }.toString().length`。
+ *
+ * ⚠️ 量法必须与线上**逐字同构**：数组口径把每个 schema 外面那层「`{ }` `,`」都算上了，
+ *   逐个 schema 相加会少算分隔符与括号 —— 算出来的数就不是请求体里那一段的数。
+ * ⚠️ **不带工具时是 0**：那一轮请求体里**没有** `tools` 字段，不占字符。
+ */
+fun toolsSegmentChars(tools: List<JsonObject>): Int =
+    if (tools.isEmpty()) 0 else buildJsonArray { tools.forEach { add(it) } }.toString().length

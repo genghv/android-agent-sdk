@@ -15,8 +15,10 @@ import ai.agentkernel.llm.openai.ChatCompletionsClient
 import ai.agentkernel.llm.openai.ReasoningWire
 import ai.agentkernel.memory.AgentMemoryCapabilities
 import ai.agentkernel.memory.ContextMemory
+import ai.agentkernel.memory.ContextPlan
 import ai.agentkernel.memory.ContextPolicy
 import ai.agentkernel.memory.MemoryStore
+import ai.agentkernel.memory.toolsSegmentChars
 import ai.agentkernel.prefix.PrefixLayout
 import ai.agentkernel.prompt.AgentSystemPrompt
 import ai.agentkernel.prompt.ShellCommandInventory
@@ -244,6 +246,14 @@ class AndroidAgentSdk(
     }
 
     /**
+     * 最近一轮的**上下文计划**（容量口径的来源）。
+     *
+     * null = 还没跑过一轮（或者没启用记忆 —— 没有压缩就没有计划）。
+     */
+    @Volatile
+    private var lastPlan: ContextPlan? = null
+
+    /**
      * 这台设备上**真实存在**的系统命令清单（只探测一次）。
      *
      * 提示词里列的命令必须是真的 —— 列一个这台机器上没有的命令，
@@ -331,12 +341,18 @@ class AndroidAgentSdk(
 
         // 超容量就在这里**压一次**；闲置到点就在这里**归档成记忆**（然后开新会话）。
         // 压缩请求必须带上**与主请求逐字相同**的工具定义，否则那次调用不吃缓存。
+        //
+        // ★ prefixCharsFor：压缩之后按**最终形态**重算前缀（新摘要替掉旧摘要位）——
+        //   压缩前的 knownChars 还含旧摘要 / 预留位，拿它加保留下来的历史会高估。
         val plan = memory?.prepare(
             history = messages,
             prefixChars = knownChars,
             replayPrefix = replayPrefix,
             tools = tools.schemas(),
+            prefixCharsFor = { summary -> parts.prefixCharsWith(summary) },
         )
+        // 留一份给宿主看（容量口径：工具段开销 / 最终估算 / 是否仍超预算）。
+        lastPlan = plan
 
         // ★ 这里拼的才是**真正要发出去**的前缀，顺序同上（摘要换成 plan.summary）。
         val prefix = ArrayList<ChatMessage>(5)
@@ -361,6 +377,28 @@ class AndroidAgentSdk(
      * 也能拿它的 [ContextMemory.memoryStore] 去翻归档里的旧记忆。
      */
     fun memory(): ContextMemory? = memory
+
+    /**
+     * 最近一轮的**容量口径**（见 [ContextPlan]）。
+     *
+     * 宿主要回答「这一轮到底发了多大、装得下吗」，看这里：
+     *
+     * | 字段 | 含义 |
+     * |---|---|
+     * | [ContextPlan.toolsChars] | 工具定义段占多少字符（与线上请求体同构） |
+     * | [ContextPlan.estimatedChars] | 这一轮的**估算**总字符数（前缀 + 工具段 + 正文） |
+     * | [ContextPlan.overBudget] | 估算是否**仍超** `memoryPolicy.maxContextChars`（只报不压） |
+     *
+     * ```
+     * val plan = sdk.lastContextPlan()
+     * if (plan?.overBudget == true) {
+     *     // 压完还是超 ⇒ 该调 ContextPolicy 了（SDK 不会自己再压一次）
+     * }
+     * ```
+     *
+     * null = 还没跑过一轮（或者没启用记忆）。
+     */
+    fun lastContextPlan(): ContextPlan? = lastPlan
 
     /**
      * 会话**归档**仓库（null = 没启用记忆 ⇒ 不会有归档）。
@@ -394,6 +432,7 @@ class AndroidAgentSdk(
      * | [SystemBudget.totalChars] | 这一轮**实际**会发出去多少字符 |
      * | [SystemBudget.over] | 实际超了 ⇒ 网关会截（要处理） |
      * | [SystemBudget.overflow] | **把记忆砍光也装不下** ⇒ 提示词本身太大（要改配置） |
+     * | [SystemBudget.toolsChars] | 工具定义段占多少字符（**不在** system 段里，但同样占请求体） |
      *
      * @param limitChars 网关的 system 段上限；null = 不检查（直连官方 API）。
      */
@@ -408,6 +447,7 @@ class AndroidAgentSdk(
             summaryChars = parts.summaryChars,
             reservedSummaryChars = parts.summaryReserve,
             promptFileTruncated = parts.promptFileTruncated,
+            toolsChars = toolsSegmentChars(tools.schemas()),
         )
     }
 
@@ -519,6 +559,21 @@ class AndroidAgentSdk(
          */
         val plannedChars: Int
             get() = joinChars(promptChars, digestChars, summaryReserve, alertChars)
+
+        /**
+         * 压缩之后的前缀字符数（**最终形态**：新摘要替掉旧摘要位）。
+         *
+         * 与 [runTurn] 真正拼出来的那几段**一一对应**
+         * （提示词 → 长期记忆 → 会话摘要 → 工作区告警），所以估算与真实请求体对得上。
+         *
+         * @param summary 压缩产生的**新**会话摘要；null = 这一轮没有摘要段。
+         */
+        fun prefixCharsWith(summary: String?): Int = joinChars(
+            promptChars,
+            digestChars,
+            summary?.let { SUMMARY_HEADER.length + it.length } ?: 0,
+            alertChars,
+        )
 
         private companion object {
             /**
@@ -885,6 +940,8 @@ class AndroidAgentSdk(
  * @param reservedSummaryChars 协调时为「会话摘要」**预留**的字符数
  *   （摘要可能这一轮才出现，所以要提前留位）。
  * @param promptFileTruncated 提示词文件被截断了吗？（true = 内容超了上限，只用了一部分）。
+ * @param toolsChars 工具定义段的字符数 —— 与线上请求体**同构**
+ *   （它不在 system 段里，但同样占这一轮请求体；线上不带工具时为 0）。
  */
 data class SystemBudget(
     val promptChars: Int,
@@ -899,6 +956,8 @@ data class SystemBudget(
     val reservedSummaryChars: Int = 0,
     /** 提示词文件被截断了吗？（true = 内容超了上限，只用了一部分） */
     val promptFileTruncated: Boolean = false,
+    /** 工具定义段的字符数（与线上请求体同构；线上不带工具时为 0）。 */
+    val toolsChars: Int = 0,
 ) {
     /** 是否会超限（按**实际**发出的字符数算）。 */
     val over: Boolean get() = limitChars != null && totalChars > limitChars

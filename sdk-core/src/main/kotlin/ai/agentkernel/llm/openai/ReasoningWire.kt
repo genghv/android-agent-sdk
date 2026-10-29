@@ -24,7 +24,7 @@ import kotlinx.serialization.json.put
  * | 形状 | 发出去的字段 | 适用 |
  * |---|---|---|
  * | [GATEWAY] | `reasoning_strength` = 整数编码 | 走我们网关（**默认**，现有调用方零影响） |
- * | [DEEPSEEK] | `thinking` = `{"type":"enabled"｜"disabled"}` | DeepSeek 官方（**目前只有开关**） |
+ * | [DEEPSEEK] | `thinking` = `{"type":"enabled｜"disabled"}` **＋** `reasoning_effort` = `"low｜high｜max"` | DeepSeek 官方（**开关与强度是两个独立参数**） |
  * | [OPENAI] | `reasoning_effort` = `"minimal"｜"low"｜"medium"｜"high"` | OpenAI 系（**字符串**档位） |
  *
  * ## 强度编码 → 厂商档位（直连时没有目录，只能用内置表）
@@ -35,22 +35,55 @@ import kotlinx.serialization.json.put
  *
  * | 编码 | GATEWAY | DEEPSEEK | OPENAI |
  * |---|---|---|---|
- * | 1（关闭思考） | `1` | `thinking.type=disabled` | `minimal`（OpenAI **没有**「关闭思考」这一档，最接近的就是 minimal） |
- * | 2（low） | `2` | `thinking.type=enabled` | `low` |
- * | 4（medium） | `4` | 同上 | `medium` |
- * | 8（high） | `8` | 同上 | `high` |
- * | 16 / 32（max） | 原样 | 同上 | `high`（OpenAI 最高档就是 high） |
+ * | 1（关闭思考） | `1` | `thinking.type=disabled`（**不带 effort**） | `minimal`（OpenAI **没有**「关闭思考」这一档，最接近的就是 minimal） |
+ * | 2（low） | `2` | `thinking.type=enabled` ＋ `low` | `low` |
+ * | 4（medium） | `4` | `thinking.type=enabled` ＋ `low`（见下） | `medium` |
+ * | 8（high） | `8` | `thinking.type=enabled` ＋ `high` | `high` |
+ * | 16（max） | 原样 | `thinking.type=enabled` ＋ `max` | `high`（OpenAI 最高档就是 high） |
+ * | 32（xhigh） | 原样 | `thinking.type=enabled` ＋ `max` | `high` |
  *
- * ⚠️ **DeepSeek 官方目前只有开关**（`thinking.type`）⇒ 直连 DeepSeek 时，
- * 「强度上限」这个语义**无法表达**。
- * ⚠️ **准确说法是「未证实厂商支持档位」，不是「厂商限制」**
- * （实测 2026-10-29，`deepseek-flash` 与 `deepseek-v4-pro`）：
- * `reasoning_effort` 的四档**全部 200**，但**非法档 `ultra` 也 200** ⇒ 厂商**不校验**它
- * ⇒ 与「厂商认识并应用」不相容；且各档思维链长度又**全部撞 `max_tokens` 上限**
- * ⇒ **读不出「档位是否生效」** ⇒ **表现与「静默忽略」一致**
- * ⇒ SDK **不据此扩能力**（宁可少发一个字段，也不要让用户以为设了、其实没变）。
- * ⚠️ 另注：官方文档当前示例里 `reasoning_effort` 与 `thinking` **并用** ——
- * **文档写了 ≠ 厂商真支持**。
+ * ## DeepSeek 官方：**开关与强度是两个独立参数**（2026-10-29 按官方文档订正）
+ *
+ * 官方文档：<https://api-docs.deepseek.com/guides/thinking_mode>
+ *
+ * | 参数 | OpenAI 兼容格式 |
+ * |---|---|
+ * | 思考开关 | `{"thinking": {"type": "enabled"｜"disabled"}}` |
+ * | 思考强度 | `{"reasoning_effort": "low"｜"high"｜"max"}` |
+ *
+ * - **默认**：思考模式**默认开启**，默认 effort = **`high`**；
+ * - 官方「用户设的 effort → 模型实际 effort」映射表：
+ *   `minimal→low`、`low→low`、`medium→high`、`high→high`、`xhigh→high`、`max→max`、`ultra→max`
+ *   ⇒ **模型的**实际档位只有 **low / high / max** 三档。
+ *
+ * ⚠️ **【2026-10-29 订正】** 本文件此前写「DeepSeek 官方目前只有开关 ⇒ 档位无法表达」
+ * —— **那是错的，已作废**。错因：我方实测「`reasoning_effort` 四档全 200、非法档 `ultra` 也 200」
+ * ⇒ 推断成「厂商**不校验** ⇒ **不支持**」。
+ * ⇒ **200 只能证明「不报错」，既不能证明「不支持」，也不能证明「不校验」**
+ * （`ultra` 其实**是合法请求值** —— 官方表里它映射到 `max`）。
+ * ⇒ **厂商行为以官方文档为准**，实测只能用来验证、不用来否定。
+ *
+ * ⚠️ 由此还暴露一个**真实缺陷**（本版修掉）：
+ *    既然厂商默认 effort = `high`，那么只发开关、不发 effort
+ *    ⇒ **用户选「低」也实际得到「高」** —— 正是本 SDK 一贯反对的「以为设了、其实没变」。
+ *    ⇒ [DEEPSEEK] 现在**同时**发开关与强度。
+ *
+ * ### 强度编码 → DeepSeek 实际档位（只向下）
+ *
+ * 编码是**上限** ⇒ 取「实际档位 ≤ 上限」里最高的那个。
+ * DeepSeek 的实际档位只有 `low`/`high`/`max` ⇒ **中间没有位置**：
+ *
+ * | 编码 | 我方语义 | DeepSeek 实际档 | 说明 |
+ * |---|---|---|---|
+ * | 1 | 关闭思考 | **不发 effort**（只发 `thinking.type=disabled`） | 关闭时强度无意义 |
+ * | 2 | low | `low` | |
+ * | 4 | medium | `low` | ⚠️ **DeepSeek 没有 low 与 high 之间的档** ⇒ 落到 low |
+ * | 8 | high | `high` | 官方默认档 |
+ * | 16 | max | `max` | |
+ * | 32 | xhigh | `max` | DeepSeek 最高档就是 max |
+ *
+ * ⚠️ 「选『中』实际得到『低』」是**厂商档位稀疏**造成的，**不是** SDK 吞了它 ——
+ * 这正是「只向下」契约的兑现（**实际 ≤ 请求**）。
  *
  * ## 怎么选
  *
@@ -64,7 +97,10 @@ enum class ReasoningWire {
     /** 我们网关的私有形状：`reasoning_strength` = 整数强度编码。**默认**。 */
     GATEWAY,
 
-    /** DeepSeek 官方：`thinking` = `{"type":"enabled"｜"disabled"}`（**只有开关**）。 */
+    /**
+     * DeepSeek 官方：`thinking` = `{"type":"enabled"｜"disabled"}`
+     * **＋** `reasoning_effort` = `"low"｜"high"｜"max"`（**开关与强度是两个独立参数**）。
+     */
     DEEPSEEK,
 
     /** OpenAI 系：`reasoning_effort` = 字符串档位（`minimal` / `low` / `medium` / `high`）。 */
@@ -80,14 +116,34 @@ enum class ReasoningWire {
         if (strength == null) return
         when (this) {
             GATEWAY -> builder.put("reasoning_strength", strength)
-            DEEPSEEK -> builder.put(
-                "thinking",
-                buildJsonObject {
-                    put("type", if (strength <= ReasoningStrength.OFF.value) "disabled" else "enabled")
-                },
-            )
+            DEEPSEEK -> {
+                val off = strength <= ReasoningStrength.OFF.value
+                builder.put(
+                    "thinking",
+                    buildJsonObject {
+                        put("type", if (off) "disabled" else "enabled")
+                    },
+                )
+                // ⚠️ 官方默认 effort = high ⇒ **不发就等于发 high** ⇒ 用户选「低」会被静默抬成「高」。
+                //    所以关闭时只发开关、开启时**必须**把强度也带上（档位见 [deepSeekLevel]）。
+                if (!off) builder.put("reasoning_effort", deepSeekLevel(strength))
+            }
             OPENAI -> builder.put("reasoning_effort", openAiLevel(strength))
         }
+    }
+
+    /**
+     * 强度编码 → **DeepSeek 的实际档位**（`low` / `high` / `max`，只向下）。
+     *
+     * 官方表里 `minimal→low`、`low→low`、`medium→high`、`high→high`、`xhigh→high`、
+     * `max→max`、`ultra→max` ⇒ 模型的**实际**档位只有三档。
+     * 编码是**上限** ⇒ 取「实际档 ≤ 上限」里最高的那个：
+     * `≤4 → low`（DeepSeek 没有 low 与 high 之间的档）、`≤8 → high`、其余 → `max`。
+     */
+    private fun deepSeekLevel(strength: Int): String = when {
+        strength <= ReasoningStrength.MEDIUM.value -> "low"
+        strength <= ReasoningStrength.HIGH.value -> "high"
+        else -> "max"
     }
 
     /**

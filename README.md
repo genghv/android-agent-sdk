@@ -202,7 +202,7 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 
 | `sdk-core/src/test/kotlin/ai/agentkernel/tools/exec/ExecOutputTruncationTest.kt` | **工具输出截断**（5 条）：**总长 ≤ 上限**（标记行算进预算）/ 默认上限也是硬线 / **标记里的「省略 N 字符」等于真正没露出来的原文数**（输出大到位数变化时也不失真）/ 上限小到放不下标记时给原文开头，**不返回空串** |
 
-| `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningWireTest.kt` | **思考强度的线格式**（9 条）：网关形状发 `reasoning_strength`（默认，既有调用方零影响）/ **DeepSeek 形状只发 `thinking`、绝不发 `reasoning_strength`** / **OpenAI 形状只发 `reasoning_effort`** / 取上限内最高的已知档（只向下）/ 强度没设就什么都不发 / `deepSeek` 工厂按地址自动选形状 / 宿主的 `extra` 仍然最后生效 |
+| `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningWireTest.kt` | **思考强度的线格式**（11 条）：网关形状发 `reasoning_strength`（默认，既有调用方零影响）/ **DeepSeek 形状发 `thinking` ＋ `reasoning_effort`（官方是两个独立参数）、绝不发 `reasoning_strength`** / **强度编码只向下落到 DeepSeek 的实际档位（low/high/max）** / 关闭思考只发 `disabled`、不带强度 / **OpenAI 形状只发 `reasoning_effort`** / 取上限内最高的已知档（只向下）/ 强度没设就什么都不发 / `deepSeek` 工厂按地址自动选形状 / 宿主的 `extra` 仍然最后生效 |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningContentPassthroughTest.kt` | **思维链回传**（8 条）：**带 tools 的请求里，历史中每一条 assistant 的思维链都要回传** —— **包括模型那一回合没调工具的**（漏了上游 400）/ 纯文本回合的思维链**照旧要带** / 没有思维链就不带这个字段 / 空串不算「有」/ **线格式与归档那份同一口径**（不会出现「归档里有、回传没了」） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/RequestShapeSummaryTest.kt` | **上游失败时的请求形状摘要**（5 条）：上游 400 时错误信息里**带得上形状**（消息数 / assistant 条数 / 带思维链条数 / 带工具调用条数 / 工具结果条数 / 带不带 tools）/ **一个字的正文都不带**（思维链只记总字符数）/ **原错误信息与异常类型都不变**（宿主的 catch 与日志匹配不受影响）/ 成功路径不受影响 |
 
@@ -427,7 +427,7 @@ val client = ChatCompletionsClient(
 | `model` | `AndroidAgentSdk` | 模型名。DeepSeek 官方：`deepseek-chat`（不思考、快）/ `deepseek-reasoner`（会推理） |
 | `maxTokens` | `AndroidAgentSdk` | 回答的 token 上限（`max_tokens`）。**不填就不带这个字段**，由服务端用默认值 |
 | `reasoningStrength` | `AndroidAgentSdk` | 思考强度的**强度编码**（2 的幂：1=关闭思考 / 2=low / 4=medium / 8=high / 16=max）。**不填就不带**，由服务端用默认档；它是**上限**（服务端只向下取）。合法档位用 `EffortCatalogClient` 问服务端要，别自己抄 |
-| `reasoningWire` | `ChatCompletionsClient` | 思考强度的**线格式**（`ReasoningWire`）：`GATEWAY`（默认，发 `reasoning_strength`）/ `DEEPSEEK`（发 `thinking`）/ `OPENAI`（发 `reasoning_effort`）。**直连厂商官方时必须换** —— `reasoning_strength` 是网关私有字段，发给厂商只会被忽略或 400（**静默不生效**）。`deepSeek(...)` 工厂按地址自动选 |
+| `reasoningWire` | `ChatCompletionsClient` | 思考强度的**线格式**（`ReasoningWire`）：`GATEWAY`（默认，发 `reasoning_strength`）/ `DEEPSEEK`（发 `thinking` ＋ `reasoning_effort`，**官方是两个独立参数**）/ `OPENAI`（发 `reasoning_effort`）。**直连厂商官方时必须换** —— `reasoning_strength` 是网关私有字段，发给厂商只会被忽略或 400（**静默不生效**）。`deepSeek(...)` 工厂按地址自动选 |
 | `temperature` | `AndroidAgentSdk` | 采样温度 |
 | `extraRequest` | `AndroidAgentSdk` | 透传任意 JSON 字段（厂商扩展参数） |
 | `maxTurns` | `AndroidAgentSdk` | 一轮最多几次模型往返，默认 32 |

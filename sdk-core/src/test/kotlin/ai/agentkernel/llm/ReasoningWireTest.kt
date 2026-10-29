@@ -99,7 +99,7 @@ class ReasoningWireTest {
     // ---------- 厂商形状 ----------
 
     @Test
-    fun `DeepSeek 形状：只发 thinking，绝不发 reasoning_strength`() = runBlocking {
+    fun `DeepSeek 形状：发开关和强度，绝不发 reasoning_strength`() = runBlocking {
         val body = send(wire = ReasoningWire.DEEPSEEK, strength = 8)
 
         val thinking = body["thinking"]!!.jsonObject
@@ -108,15 +108,45 @@ class ReasoningWireTest {
             body.containsKey("reasoning_strength"),
             "★ 直连厂商时 `reasoning_strength` 是没人翻译的私有字段 ⇒ 发出去只会被忽略或 400",
         )
-        assertFalse(body.containsKey("reasoning_effort"), "DeepSeek 不认这个字段")
+        // ⚠️ 官方文档：开关与强度是**两个独立参数** ⇒ 直连时两个都要发。
+        assertEquals("high", body["reasoning_effort"]!!.jsonPrimitive.content)
     }
 
     @Test
-    fun `DeepSeek 形状：关闭思考发 disabled`() = runBlocking {
+    fun `DeepSeek 形状：关闭思考发 disabled 且不带强度`() = runBlocking {
         val body = send(wire = ReasoningWire.DEEPSEEK, strength = 1)
 
         val thinking = body["thinking"]!!.jsonObject
         assertEquals("disabled", thinking["type"]!!.jsonPrimitive.content)
+        assertFalse(
+            body.containsKey("reasoning_effort"),
+            "关闭思考时强度无意义 ⇒ 不该发（厂商默认 effort 是 high，但思考都关了）",
+        )
+    }
+
+    /**
+     * 强度编码 → DeepSeek 的**实际**档位（只向下）。
+     *
+     * 官方表：minimal→low / low→low / medium→high / high→high / xhigh→high / max→max / ultra→max
+     * ⇒ 实际档位只有 low / high / max 三档。
+     * 编码是**上限** ⇒ 取「实际档 ≤ 上限」里最高的那个。
+     */
+    @Test
+    fun `DeepSeek 形状：强度编码只向下落到 DeepSeek 的实际档位`() = runBlocking {
+        assertEquals("low", send(wire = ReasoningWire.DEEPSEEK, strength = 2)["reasoning_effort"]!!.jsonPrimitive.content)
+        // ⚠️ DeepSeek 没有 low 与 high 之间的档 ⇒ 「中」落到 low（只向下，不是被吞掉）
+        assertEquals("low", send(wire = ReasoningWire.DEEPSEEK, strength = 4)["reasoning_effort"]!!.jsonPrimitive.content)
+        assertEquals("high", send(wire = ReasoningWire.DEEPSEEK, strength = 8)["reasoning_effort"]!!.jsonPrimitive.content)
+        assertEquals("max", send(wire = ReasoningWire.DEEPSEEK, strength = 16)["reasoning_effort"]!!.jsonPrimitive.content)
+        assertEquals("max", send(wire = ReasoningWire.DEEPSEEK, strength = 32)["reasoning_effort"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `DeepSeek 形状：强度没设就不发字段（厂商用它自己的默认档）`() = runBlocking {
+        val body = send(wire = ReasoningWire.DEEPSEEK, strength = null)
+
+        assertFalse(body.containsKey("thinking"), "没设强度 ⇒ 连开关也不发")
+        assertFalse(body.containsKey("reasoning_effort"), "没设强度 ⇒ 不发强度")
     }
 
     @Test
@@ -163,6 +193,7 @@ class ReasoningWireTest {
 
         val body = bodyOf(transport)
         assertTrue(body.containsKey("thinking"), "官方地址 ⇒ 官方形状（thinking）")
+        assertTrue(body.containsKey("reasoning_effort"), "官方形状：开关与强度两个独立参数都要发")
         assertFalse(body.containsKey("reasoning_strength"), "官方地址不该发网关私有字段")
     }
 

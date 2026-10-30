@@ -46,12 +46,12 @@ class ConversationSummarizerTest {
 
     @Test
     fun `摘要成功时返回正文`() = runBlocking {
-        val llm = FakeLlm(reply = "  事实：用户在配网关  ")
+        val llm = FakeLlm(reply = "  事实：用户在配后端  ")
         val summarizer = ConversationSummarizer(llm, "test-model")
 
         val out = summarizer.summarize(toCompress(), targetChars = 1_200)
 
-        assertEquals("事实：用户在配网关", out)
+        assertEquals("事实：用户在配后端", out)
         assertEquals(1, llm.requests.size)
     }
 

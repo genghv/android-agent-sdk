@@ -88,7 +88,7 @@ class DevicePromptBudgetTest {
     private val policy = WorkspacePolicy(quota = Quota.PercentOfFreeSpace(5.0))
 
     @Test
-    fun `核心模式要装得进网关的 2000 字符预算`() {
+    fun `核心模式要装得进后端的 2000 字符预算`() {
         val core = AgentSystemPrompt.build(
             layout,
             capabilities,
@@ -99,7 +99,7 @@ class DevicePromptBudgetTest {
         println("[device-prompt] CORE = ${core.length} 字符（预算 2000）")
         assertTrue(
             core.length < 2000,
-            "核心模式必须装进网关 system 段，现在 ${core.length} 字符，超了 ${core.length - 2000}",
+            "核心模式必须装进后端 system 段，现在 ${core.length} 字符，超了 ${core.length - 2000}",
         )
     }
 

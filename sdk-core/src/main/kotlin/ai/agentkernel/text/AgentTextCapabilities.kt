@@ -19,7 +19,7 @@ import java.io.File
  * ## 为什么只做**一条**命令
  *
  * 拆成 `agent-text-read` / `agent-text-patch` 两条，提示词里就多两行 ——
- * 而网关对客户端 system 段有 2000 字符上限。所以合成一条带子命令的 `agent-text`，
+ * 而后端对客户端 system 段有 2000 字符上限。所以合成一条带子命令的 `agent-text`，
  * 用法只占一行。
  *
  * ## 命令

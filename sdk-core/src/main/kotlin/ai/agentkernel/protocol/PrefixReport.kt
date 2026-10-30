@@ -17,7 +17,7 @@ package ai.agentkernel.protocol
  * 通用做法是**另起一份独立视角复核**：
  * 重新算一遍会话、再和实际请求逐字比，
  * 注释写得很直白 —— *the live cache cannot vouch for itself*（活着的缓存自己没法给自己作证）。
- * 网关侧那一份就是它的服务端对应（见服务端的 `prefix` 字段）。
+ * 后端侧那一份就是它的服务端对应（见服务端的 `prefix` 字段）。
  *
  * ## 怎么读
  *

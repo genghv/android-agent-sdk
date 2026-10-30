@@ -17,7 +17,7 @@ import kotlinx.serialization.json.put
  *
  * 线格式那份是**给上游看的**，归档是**给人看的**（前端要照常显示）：
  *
- * - 线格式里 assistant 的 content **永远给字符串**（null 会被有些网关拒），
+ * - 线格式里 assistant 的 content **永远给字符串**（null 会被有些后端拒），
  *   于是「本来就没正文的 tool 回合」和「正文是空串」分不出来了 —— 归档里要分得清；
  * - 线格式**不带** `finish_reason`，但截断（`'length'`）是要显示给人看的。
  *

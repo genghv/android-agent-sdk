@@ -29,7 +29,7 @@ import kotlinx.serialization.json.put
  * ## 为什么只做**一条**命令
  *
  * 拆成 `agent-memory-list` / `agent-memory-add` / … 六条，提示词里就多六行。
- * 而网关对客户端 system 段有 2000 字符上限（真机实测设备提示词已占 1809）——
+ * 而后端对客户端 system 段有 2000 字符上限（真机实测设备提示词已占 1809）——
  * 每多一行都在挤占那条上限。所以合成一条带子命令的 `agent-memory`，
  * 用法只占一行。
  *

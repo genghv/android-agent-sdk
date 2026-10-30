@@ -27,7 +27,7 @@ import kotlin.test.assertTrue
  * 这几条守的是**契约**：
  * - 输出**一律是 JSON**（模型要按字段取值，不能靠肉眼看）；
  * - 失败**抛 [CapabilityFailure]**（注册表会转成 `{"ok":false,...}` + 退出码 1）；
- * - 只有**一条**命令（提示词里每多一行就多占字符，网关对 system 段有 2000 字符上限）。
+ * - 只有**一条**命令（提示词里每多一行就多占字符，后端对 system 段有 2000 字符上限）。
  */
 class AgentMemoryCapabilitiesTest {
 
@@ -81,7 +81,7 @@ class AgentMemoryCapabilitiesTest {
     @Test
     fun `list 列出全部记忆`() {
         val store = store()
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "用户在配网关"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "用户在配后端"))
         store.append(MemoryEntry("20261028-1100", 2_000L, "改提示词", "提示词要瘦身"))
 
         val out = run(capability(store), "list")
@@ -99,20 +99,20 @@ class AgentMemoryCapabilitiesTest {
     @Test
     fun `get 读出正文`() {
         val store = store()
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "用户在配网关"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "用户在配后端"))
 
         val out = run(capability(store), "get", "20261028-1000")
         assertTrue(out["ok"]!!.jsonPrimitive.boolean)
         assertEquals("20261028-1000", out["id"]!!.jsonPrimitive.content)
-        assertEquals("配网关", out["title"]!!.jsonPrimitive.content)
-        assertEquals("用户在配网关", out["summary"]!!.jsonPrimitive.content)
+        assertEquals("配后端", out["title"]!!.jsonPrimitive.content)
+        assertEquals("用户在配后端", out["summary"]!!.jsonPrimitive.content)
         assertEquals(1_000L, out["createdAt"]!!.jsonPrimitive.longOrNull)
     }
 
     @Test
     fun `add 追加一条并返回 id`() {
         val store = store()
-        val out = run(capability(store), "add", "事实：用户把网关跑在 8080 端口")
+        val out = run(capability(store), "add", "事实：用户把后端跑在 8080 端口")
         assertTrue(out["ok"]!!.jsonPrimitive.boolean)
 
         val id = out["id"]!!.jsonPrimitive.content
@@ -120,8 +120,8 @@ class AgentMemoryCapabilitiesTest {
         val all = store.list()
         assertEquals(1, all.size)
         assertEquals(id, all[0].id)
-        assertEquals("事实：用户把网关跑在 8080 端口", all[0].summary)
-        assertEquals("事实：用户把网关跑在 8080 端口", all[0].title, "标题取正文第一行")
+        assertEquals("事实：用户把后端跑在 8080 端口", all[0].summary)
+        assertEquals("事实：用户把后端跑在 8080 端口", all[0].title, "标题取正文第一行")
     }
 
     @Test
@@ -141,7 +141,7 @@ class AgentMemoryCapabilitiesTest {
     @Test
     fun `delete 删掉一条`() {
         val store = store()
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "用户在配网关"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "用户在配后端"))
 
         val out = run(capability(store), "delete", "20261028-1000")
         assertTrue(out["ok"]!!.jsonPrimitive.boolean)
@@ -152,7 +152,7 @@ class AgentMemoryCapabilitiesTest {
     @Test
     fun `search 按关键词命中`() {
         val store = store()
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "用户在配 Gateway"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "用户在配 Gateway"))
         store.append(MemoryEntry("20261028-1100", 2_000L, "改提示词", "提示词要瘦身"))
 
         val out = run(capability(store), "search", "gateway")
@@ -160,7 +160,7 @@ class AgentMemoryCapabilitiesTest {
         assertEquals(1, out["count"]!!.jsonPrimitive.int)
         val hit = out["entries"]!!.jsonArray.single().jsonObject
         assertEquals("20261028-1000", hit["id"]!!.jsonPrimitive.content)
-        assertEquals("配网关", hit["title"]!!.jsonPrimitive.content)
+        assertEquals("配后端", hit["title"]!!.jsonPrimitive.content)
     }
 
     // ---- 失败路径 ----

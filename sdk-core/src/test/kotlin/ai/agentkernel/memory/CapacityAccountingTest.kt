@@ -346,7 +346,7 @@ class CapacityAccountingTest {
             alert.length,
         )
 
-        /** 多段 system 拼起来的总字符数：每多一段就多 2 个字符（网关用空行拼）。 */
+        /** 多段 system 拼起来的总字符数：每多一段就多 2 个字符（后端用空行拼）。 */
         private fun joinLengths(vararg lengths: Int): Int {
             val kept = lengths.filter { it > 0 }
             if (kept.isEmpty()) return 0

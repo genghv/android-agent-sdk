@@ -42,7 +42,7 @@ data class UserMessage(val content: String) : ChatMessage {
  *
  * 照抄 DeepSeek 官方线格式那份**拿 live 流校验过**的序列化器，assistant 的 content
  * **永远给字符串**：
- * - 有些网关直接拒 null；
+ * - 有些后端直接拒 null；
  * - 「只有思考、既无正文又无 tool_calls」的回合，live API 会 400
  *   （`content or tool_calls must be set`）；而这条消息会留在会话日志里，
  *   一旦是 null 就会把后面每一轮都带崩。
@@ -80,14 +80,14 @@ data class AssistantMessage(
     /**
      * 本次请求的 token 用量（命中/未命中缓存都含在里面）。
      *
-     * null = 上游没给（老网关、或服务不报用量）。
+     * null = 上游没给（老后端、或服务不报用量）。
      * **别把 null 当成「没命中」** —— 那两回事：前者是「不知道」，后者是「确实没命中」。
      */
     val usage: Usage? = null,
     /**
-     * **服务端视角**的前缀体检报告（网关回的 `prefix` 字段）。
+     * **服务端视角**的前缀体检报告（后端回的 `prefix` 字段）。
      *
-     * null = 服务端没给（不是 OpenAI 标准字段，只有支持它的网关会回）。
+     * null = 服务端没给（不是 OpenAI 标准字段，只有支持它的后端会回）。
      * 有了它，宿主就能知道「缓存没全命中」是**谁**造成的 ——
      * 服务端拼的头部（平台提示词/技能/工具定义）App 本地看不见。
      * ⚠️ 这是**响应侧**字段，不参与 [toJson]（回传时会原样丢弃）。
@@ -121,7 +121,7 @@ data class ToolMessage(
     override fun toJson(): JsonObject = buildJsonObject {
         put("role", "tool")
         put("tool_call_id", toolCallId)
-        // 空输出也要有内容（生产序列化器的做法：'(no output)'）—— 网关对空 tool content 有意见。
+        // 空输出也要有内容（生产序列化器的做法：'(no output)'）—— 后端对空 tool content 有意见。
         put("content", content.ifEmpty { "(no output)" })
     }
 }

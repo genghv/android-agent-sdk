@@ -28,7 +28,7 @@ import kotlinx.serialization.json.put
  *    内容细节被改写，摘要质量下降；而逐字重放的话，**上游前缀缓存能命中**
  *    （这一段和主请求里的那段是**同样的字节**）。
  * 2. **工具定义与主请求逐字一致**（`tools` 原样带上）。
- *    ⚠️ 送 `emptyList()` 的话，网关拼出来的请求体和主请求**不是同一串字节**，
+ *    ⚠️ 送 `emptyList()` 的话，后端拼出来的请求体和主请求**不是同一串字节**，
  *    压缩这次调用就**不吃缓存**；工具段一变，缓存从那儿起全部作废。
  * 3. **压缩指令是最后一条 user message**。
  *    指令放最前面的话，它会顶在稳定前缀的最外侧 —— 每次压缩的指令只要差一个字，
@@ -140,7 +140,7 @@ class ConversationSummarizer(
             tools = tools,
             temperature = temperature,
             maxTokens = maxTokens,
-            // 网关据此识别压缩请求，并用后端提示词库里的正文替换这条指令；
+            // 后端据此识别压缩请求，并用后端提示词库里的正文替换这条指令；
             // 直连 DeepSeek 时该字段被忽略（官方会忽略未知字段）。
             extra = buildJsonObject { put("compact", true) },
             sessionId = sessionId,

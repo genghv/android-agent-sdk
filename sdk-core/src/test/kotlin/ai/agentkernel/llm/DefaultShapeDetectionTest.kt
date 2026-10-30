@@ -21,12 +21,12 @@ import kotlin.test.assertTrue
  * ## 规则
  *
  * **地址是 DeepSeek 官方域名** ⇒ 自动用官方形状（`thinking` ＋ `reasoning_effort`）；
- * **其它一切地址** ⇒ 保持网关形状（`reasoning_strength`）—— 与以前一样。
+ * **其它一切地址** ⇒ 保持自备后端形状（`reasoning_strength`）—— 与以前一样。
  *
  * ## 为什么从「整串相等」改成「按域名」
  *
  * 老规则是 `baseUrl == "https://api.deepseek.com/v1"`（**字符串精确相等**）⇒
- * 下面这些**全是官方地址、却全被判成网关形状**：
+ * 下面这些**全是官方地址、却全被判成自备后端形状**：
  * `https://api.deepseek.com`（不带 /v1）、带端口、带尾斜杠、大小写不同……
  *
  * ⇒ 那种调用方发的是 `reasoning_strength` ⇒ **DeepSeek 不认**（忽略或 400）
@@ -77,7 +77,7 @@ class DefaultShapeDetectionTest {
         val body = bodyFor("https://api.deepseek.com/v1")
         assertTrue(body.containsKey("thinking"), "官方域名 ⇒ 官方形状（thinking）")
         assertTrue(body.containsKey("reasoning_effort"), "官方形状：开关与强度两个独立参数都要发")
-        assertFalse(body.containsKey("reasoning_strength"), "官方地址不该发网关私有字段")
+        assertFalse(body.containsKey("reasoning_strength"), "官方地址不该发扩展字段 reasoning_strength")
     }
 
     @Test
@@ -108,24 +108,24 @@ class DefaultShapeDetectionTest {
         assertFalse(body.containsKey("reasoning_strength"))
     }
 
-    // ---------- 其它地址 ⇒ 网关形状（与以前一样） ----------
+    // ---------- 其它地址 ⇒ 自备后端形状（与以前一样） ----------
 
     @Test
-    fun `其它域名 ⇒ 仍是网关形状`() = runBlocking {
+    fun `其它域名 ⇒ 仍是自备后端形状`() = runBlocking {
         val body = bodyFor("https://api.openai.com/v1")
         assertEquals(8, body["reasoning_strength"]!!.jsonPrimitive.content.toInt())
-        assertFalse(body.containsKey("thinking"), "非官方地址 ⇒ 网关形状（与以前一样）")
+        assertFalse(body.containsKey("thinking"), "非官方地址 ⇒ 自备后端形状（与以前一样）")
     }
 
     @Test
-    fun `自建网关地址 ⇒ 仍是网关形状`() = runBlocking {
+    fun `自建后端地址 ⇒ 仍是自备后端形状`() = runBlocking {
         val body = bodyFor("https://our-gateway.example/v1")
         assertEquals(8, body["reasoning_strength"]!!.jsonPrimitive.content.toInt())
-        assertFalse(body.containsKey("thinking"), "自建网关 ⇒ 网关形状（与以前一样）")
+        assertFalse(body.containsKey("thinking"), "自建后端 ⇒ 自备后端形状（与以前一样）")
     }
 
     @Test
-    fun `长得像官方但不是官方 ⇒ 仍是网关形状`() = runBlocking {
+    fun `长得像官方但不是官方 ⇒ 仍是自备后端形状`() = runBlocking {
         // ⚠️ 「后缀像」不算官方域名 —— 只认 host **恰好**是 api.deepseek.com。
         for (url in listOf(
             "https://api.deepseek.com.evil.example/v1",
@@ -135,7 +135,7 @@ class DefaultShapeDetectionTest {
             val body = bodyFor(url)
             assertTrue(
                 body.containsKey("reasoning_strength"),
-                "$url 不是官方域名 ⇒ 必须是网关形状",
+                "$url 不是官方域名 ⇒ 必须是自备后端形状",
             )
             assertFalse(body.containsKey("thinking"), "$url 不是官方域名 ⇒ 不该发官方形状")
         }

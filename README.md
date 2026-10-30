@@ -204,19 +204,20 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 
 | `sdk-core/src/test/kotlin/ai/agentkernel/tools/exec/ExecOutputTruncationTest.kt` | **工具输出截断**（5 条）：**总长 ≤ 上限**（标记行算进预算）/ 默认上限也是硬线 / **标记里的「省略 N 字符」等于真正没露出来的原文数**（输出大到位数变化时也不失真）/ 上限小到放不下标记时给原文开头，**不返回空串** |
 
-| `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningWireTest.kt` | **思考强度的线格式**（11 条）：网关形状发 `reasoning_strength`（默认，既有调用方零影响）/ **DeepSeek 形状发 `thinking` ＋ `reasoning_effort`（官方是两个独立参数）、绝不发 `reasoning_strength`** / **强度编码只向下落到 DeepSeek 的实际档位（low/high/max）** / 关闭思考只发 `disabled`、不带强度 / **OpenAI 形状只发 `reasoning_effort`** / 取上限内最高的已知档（只向下）/ 强度没设就什么都不发 / `deepSeek` 工厂按地址自动选形状 / 宿主的 `extra` 仍然最后生效 |
-| `sdk-core/src/test/kotlin/ai/agentkernel/llm/DefaultShapeDetectionTest.kt` | **默认形状判定**（9 条，v1.1.25）：官方域名（带 /v1 / 不带 /v1 / 带尾斜杠 / 带端口 / 大小写不同）⇒ **官方形状** / 其它域名与自建网关 ⇒ **仍是网关形状** / **长得像官方但不是官方**（`api.deepseek.com.evil.example`）⇒ 仍是网关形状（只看 host **恰好**等于 `api.deepseek.com`）/ **显式指定 `reasoningWire` ⇒ 一律不受影响**（零破坏的关键） |
+| `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningWireTest.kt` | **思考强度的线格式**（11 条）：自备后端形状发 `reasoning_strength`（默认，既有调用方零影响）/ **DeepSeek 形状发 `thinking` ＋ `reasoning_effort`（官方是两个独立参数）、绝不发 `reasoning_strength`** / **强度编码只向下落到 DeepSeek 的实际档位（low/high/max）** / 关闭思考只发 `disabled`、不带强度 / **OpenAI 形状只发 `reasoning_effort`** / 取上限内最高的已知档（只向下）/ 强度没设就什么都不发 / `deepSeek` 工厂按地址自动选形状 / 宿主的 `extra` 仍然最后生效 |
+| `sdk-core/src/test/kotlin/ai/agentkernel/llm/DefaultShapeDetectionTest.kt` | **默认形状判定**（9 条，v1.1.25）：官方域名（带 /v1 / 不带 /v1 / 带尾斜杠 / 带端口 / 大小写不同）⇒ **官方形状** / 其它域名与自建后端 ⇒ **仍是自备后端形状** / **长得像官方但不是官方**（`api.deepseek.com.evil.example`）⇒ 仍是自备后端形状（只看 host **恰好**等于 `api.deepseek.com`）/ **显式指定 `reasoningWire` ⇒ 一律不受影响**（零破坏的关键） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/TrueStreamingTest.kt` | **真流式**（6 条，v1.1.25）：见 `data: [DONE]` **立刻返回**（不等 body 结束）＋ **上游流真的被取消**（不是等它自己结束）/ 跨块**半行**拼回来 / 心跳注释帧（`: hb`）跳过 / 服务端不理会 `stream:true` 仍回整块 JSON 时也照样解析 / **老路（只实现 `Transport`）行为一字不变** |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/StreamingTransportTest.kt` | **真流式传输**（5 条，v1.1.25，裸 `ServerSocket` mock）：**按块吐**（分几次发就分几次拿）/ **取消后立刻返回**（服务端**故意不关连接** ⇒ 传输层不关 socket 就会真卡死；且断言**服务端确实看到客户端断开**）/ **UTF-8 跨块不乱码**（服务端把一个中文字劈成两块发）/ 非 2xx 抛异常且**消息里不含凭据明文** / **既有 `post` 路径没被改坏** |
 | `sdk-android/src/test/kotlin/ai/agentkernel/StreamingTransportAndroidTest.kt` | **Android 侧真流式传输**（4 条，v1.1.25）：OkHttp 实现同样**按块吐**、**取消即断连**、**UTF-8 不乱码**、非 2xx **先抹后截** |
-| `sdk-core/src/test/kotlin/ai/agentkernel/memory/ConversationSummarizerTest.kt` | **摘要失败不再静默**（11 条，v1.1.25）：成功返回正文 / 模型报错 ⇒ null ＋ `SummarizationFailedException` / 返回空也算失败 / **超时** ⇒ null ＋ `SummarizationTimeoutException` / 没内容可压**不算失败**（不留痕）/ **默认不重试**（只调 1 次）/ 开了重试就再试 / 重试用完仍失败 / **超时预算是总上限**（不是每次尝试重开）/ **外层取消不被吞掉**（原样抛、不冒充降级）/ **失败原因里不带凭据明文** |
+| `sdk-core/src/test/kotlin/ai/agentkernel/memory/ConversationSummarizerTest.kt` | **摘要失败不再静默**（12 条，v1.1.25）：成功返回正文 / 模型报错 ⇒ null ＋ `SummarizationFailedException` / 返回空也算失败 / **超时** ⇒ null ＋ `SummarizationTimeoutException` / 没内容可压**不算失败**（不留痕）/ **默认不重试**（只调 1 次）/ 开了重试就再试 / 重试用完仍失败 / **超时预算是总上限**（不是每次尝试重开）/ **外层取消不被吞掉**（原样抛、不冒充降级）/ **失败原因里不带凭据明文** |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/EffortCatalogTest.kt` | **档位清单兜底**（9 条，v1.1.25）：`fetchOrNull` 拉不到返回 null（**不抛**）/ 报文不认也返回 null / 拉得到返回清单 / **`fetch` 行为未变**（仍抛）/ `resolve` 三态：**server 为 null ⇒ BUILTIN** / **有服务端清单 ⇒ SERVER**（levels 用服务端那份）/ **宿主给了 ⇒ USER**（压过服务端） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningContentPassthroughTest.kt` | **思维链回传**（8 条）：**带 tools 的请求里，历史中每一条 assistant 的思维链都要回传** —— **包括模型那一回合没调工具的**（漏了上游 400）/ 纯文本回合的思维链**照旧要带** / 没有思维链就不带这个字段 / 空串不算「有」/ **线格式与归档那份同一口径**（不会出现「归档里有、回传没了」） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/RequestShapeSummaryTest.kt` | **上游失败时的请求形状摘要**（5 条）：上游 400 时错误信息里**带得上形状**（消息数 / assistant 条数 / 带思维链条数 / 带工具调用条数 / 工具结果条数 / 带不带 tools）/ **一个字的正文都不带**（思维链只记总字符数）/ **原错误信息与异常类型都不变**（宿主的 catch 与日志匹配不受影响）/ 成功路径不受影响 |
 
 | `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialStoreTest.kt` | **凭据加密存储**（42 条）：**磁盘上没有明文**（连明文的 base64 都没有）/ **host 绑定**（key 只能发给登记它的那个 host）/ **比不出 host 就拒**（fail-closed，不因为「比不了」就放行）/ **解不开就抛异常**（密文被改、被换名、没有实现）/ **路径穿越被挡**（凭据名白名单）/ **迁移先写新、校验不过就保留旧文件** / **命令面永远不吐明文**（没有取值子命令）/ **没有加密实现就安全失败**（绝不退回明文） |
+| `sdk-core/src/test/kotlin/ai/agentkernel/credential/PlaintextCredentialCipherTest.kt` | **明文凭据模式**（12 条，v1.1.26）：**默认仍然安全失败**（没 opt-in ⇒ `resolve()` 照旧抛）/ 注册后 `resolve()` 返回明文实现、`isAvailable` 与 `isPlaintextMode` 都为 true / ★ **不静默降级**（已注册任何实现 ⇒ `registerPlaintext()` **抛异常**、**不覆盖**）/ 判定看**实际实现的类型**（换成真实实现 ⇒ 自动变 false；**不是粘滞标志**）/ `reset()` 后回到 fail-closed / **明文就是明文**：落盘文件里能直接读到**明文的 base64**（base64 **不是**加密）/ `seal` 与 `open` 都原样返回字节 / ★ **只增不改**：既有公开成员一个没少（反射钉住） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/credential/Base64CodecTest.kt` | **自带的那份 base64**（8 条）：与 RFC 4648 标准向量**逐字一致** / 全部 256 个字节值往返 / **解码严格**（长度不对 / 非法字符 / 填充位置不对一律抛，**绝不尽力解一半**）—— ⚠️ 不能用 `java.util.Base64`：它是 **API 26** 才有的，而本 SDK `minSdk = 24` |
-| `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialPathGuardTest.kt` | **门禁：凭据目录的示例路径不许落在 agent 私有根里**（6 条）：扫全仓源码 + 文档代码块，命中即失败（**示例路径属于没人跑过的代码**，照抄就等于把凭据放进 agent 可达范围）/ 规则自己有用例校准（**能逮住那个真实的错误示例**）/ **不误伤**「会话归档仓库本来就在 agent 根里」/ **正文里的反例引用不算违规** |
+| `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialPathGuardTest.kt` | **门禁：凭据目录的示例路径不许落在 agent 私有根里**（9 条）：扫全仓源码 + 文档代码块，命中即失败（**示例路径属于没人跑过的代码**，照抄就等于把凭据放进 agent 可达范围）/ 规则自己有用例校准（**能逮住那个真实的错误示例**）/ **不误伤**「会话归档仓库本来就在 agent 根里」/ **正文里的反例引用不算违规** |
 | `cipher-contract-test/src/test/kotlin/com/agentsdk/cipher/KeystoreCredentialCipherTest.kt` | **闭源加密核心的契约测试**（**12 条**，源码公开，**默认构建不 include**）：密文包格式与**字节偏移**钉死（magic `ASDC` / nonce 段 / 密文体长度 = 明文 + GCM 标签）/ AAD 绑住「凭据名 + 目标 host」（换任一都解不开）/ 改一个字节、改 nonce 段、截断都解不开 / 每次密封换新 nonce / 密文包里搜不到明文 / **每条负向用例先自证基线是好的**（否则包格式整个坏掉时，这一堆负向用例会**照样全绿**）—— 一键复现见 `scripts/verify-cipher-contract.ps1` |
 
 > 当前全量：**sdk-core 369 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
@@ -263,7 +264,7 @@ gradle :sdk-android:realLlmCheck
 ```
 
 退出码 0 = 真链路跑通：模型真的下发了命令 → 命令真的执行了 → 结果真的回喂给了模型 → 模型答对了。
-这一档验的是「和真网关的线格式对不对得上」，是本地 mock 验不了的那一段。
+这一档验的是「和真后端的线格式对不对得上」，是本地 mock 验不了的那一段。
 
 
 
@@ -384,6 +385,11 @@ val sdk = AndroidAgentSdk(
 SDK 适配的是 **OpenAI Chat Completions 线格式**（请求体、流式 SSE、`tool_calls`、`reasoning_content`
 全部按 OpenAI 那套），所以**DeepSeek 官方、以及任何 OpenAI 兼容的服务，SDK 都不用改一行协议代码**。
 
+> **本 SDK 不附带任何后端服务。** 你二选一：
+>
+> - **DeepSeek 官方 API** —— 把 SDK 指向 `https://api.deepseek.com`，思考开关与强度**按 DeepSeek 官方格式**发；
+> - **自备后端** —— 你自己提供一个后端，SDK 把思考强度编码**原样**以 `reasoning_strength`（整数）下发，**由你的后端解释**。
+
 ### 最省事：直接用 DeepSeek 官方
 
 ```kotlin
@@ -408,7 +414,7 @@ println(result.finalText)
 
 ```kotlin
 val client = ChatCompletionsClient(
-    baseUrl = "https://你们的网关/v1",      // 服务地址
+    baseUrl = "https://your-backend/v1",    // 服务地址
     transport = OkHttpTransport(),
     auth = LlmAuth.bearer(token),          // 鉴权
 )
@@ -420,7 +426,7 @@ val client = ChatCompletionsClient(
 |------|-----------|-----------|
 | `LlmAuth.bearer(token)` | `Authorization: Bearer <token>` | 大多数兼容服务 |
 | `LlmAuth.bearerDynamic { ... }` | 同上，但**每次请求现取 token** | token 会过期（不用重建客户端） |
-| `LlmAuth.header("X-Token", token)` | `X-Token: <token>` | 自建网关用自己的头名 |
+| `LlmAuth.header("X-Token", token)` | `X-Token: <token>` | 自建后端用自己的头名 |
 | `LlmAuth.none()` | 不带鉴权 | 内网免鉴权 |
 
 路径不是 `/chat/completions` 时用 `chatPath` 覆盖（baseUrl 写 `.../v1`，路径写 `/internal/turn`）。
@@ -434,8 +440,8 @@ val client = ChatCompletionsClient(
 | `baseUrl` / `apiKey` | `ChatCompletionsClient` | 服务地址与鉴权 |
 | `model` | `AndroidAgentSdk` | 模型名。DeepSeek 官方：`deepseek-chat`（不思考、快）/ `deepseek-reasoner`（会推理） |
 | `maxTokens` | `AndroidAgentSdk` | 回答的 token 上限（`max_tokens`）。**不填就不带这个字段**，由服务端用默认值 |
-| `reasoningStrength` | `AndroidAgentSdk` | 思考强度的**强度编码**（2 的幂：1=关闭思考 / 2=low / 4=medium / 8=high / 16=max）。**不填就不带**，由服务端用默认档；它是**上限**（服务端只向下取）。合法档位用 `EffortCatalogClient` 问服务端要，别自己抄。<br>⚠ **「不填」≠「没开思考」**：对端默认就是**思考开 + 强度 high**（DeepSeek 官方如此，我方网关的默认档也是 high）⇒ **不填 = 开 + 高**。UI 与文案别让人读反了 |
-| `reasoningWire` | `ChatCompletionsClient` | 思考强度的**线格式**（`ReasoningWire`）：`GATEWAY`（默认，发 `reasoning_strength`）/ `DEEPSEEK`（发 `thinking` ＋ `reasoning_effort`，**官方是两个独立参数**）/ `OPENAI`（发 `reasoning_effort`）。**直连厂商官方时必须换** —— `reasoning_strength` 是网关私有字段，发给厂商只会被忽略或 400（**静默不生效**）。`deepSeek(...)` 工厂**按官方域名自动选**（host 恰好是 `api.deepseek.com` ⇒ 官方形状；其它一切地址 ⇒ 网关形状） |
+| `reasoningStrength` | `AndroidAgentSdk` | 思考强度的**强度编码**（2 的幂：1=关闭思考 / 2=low / 4=medium / 8=high / 16=max）。**不填就不带**，由服务端用默认档；它是**上限**（服务端只向下取）。合法档位用 `EffortCatalogClient` 问服务端要，别自己抄。<br>⚠ **「不填」≠「没开思考」**：对端默认就是**思考开 + 强度 high**（DeepSeek 官方如此，自备后端的默认档也是 high）⇒ **不填 = 开 + 高**。UI 与文案别让人读反了 |
+| `reasoningWire` | `ChatCompletionsClient` | 思考强度的**线格式**（`ReasoningWire`）：`GATEWAY`（默认，发 `reasoning_strength`）/ `DEEPSEEK`（发 `thinking` ＋ `reasoning_effort`，**官方是两个独立参数**）/ `OPENAI`（发 `reasoning_effort`）。**直连厂商官方时必须换** —— `reasoning_strength` 是**扩展字段**（由自备后端自行解释），发给厂商只会被忽略或 400（**静默不生效**）。`deepSeek(...)` 工厂**按官方域名自动选**（host 恰好是 `api.deepseek.com` ⇒ 官方形状；其它一切地址 ⇒ 自备后端形状） |
 | `temperature` | `AndroidAgentSdk` | 采样温度 |
 | `extraRequest` | `AndroidAgentSdk` | 透传任意 JSON 字段（厂商扩展参数） |
 | `maxTurns` | `AndroidAgentSdk` | 一轮最多几次模型往返，默认 32 |
@@ -448,7 +454,15 @@ val client = ChatCompletionsClient(
 > SDK 会把上游的 `finish_reason` 如实带回来 —— 被截断时是 `length`（`AssistantMessage.finishReason`），
 > 不会假装答完了。
 
-### 接自建网关前，确认这三件事
+> ⚠️ **思考强度：一个编码，一个方法（v1.1.26）**
+>
+> **本地只存一个编码，发给 SDK 的也是这一个**：
+> **本地只保存一个强度编码**（`1` 关 / `2` low / `4` medium / `8` high / `16` max / `32` xhigh）——
+> **「关」就是 `1`** ⇒ 不必再单独存一个「开/关」开关 ⇒ **宿主不用拆成两维**。
+> 首次进入 = **开 + 高**（`8`）；什么都不给 ⇒ **一个思考字段都不发** ＝ 对端默认「开 + 高」。
+> ⇒ **SDK 侧只需要一个参数**，宿主也不必分两套逻辑。
+
+### 接自建后端前，确认这三件事
 
 1. **透传 `tools`** —— 不透传，模型就看不见工具，永远吐不出 `tool_calls`，第一轮就卡死；
 2. **system 段别截断** —— 提示词是模型的「环境说明书」，砍掉就等于没写
@@ -506,7 +520,7 @@ SDK 给你三样观测手段：
 ```kotlin
 result.usage      // Usage?：上游报的命中/未命中 token（不是本地估的）
 result.context    // ContextReport?：前缀有没有被动过、断点在下标几
-result.prefix     // PrefixReport?：**服务端**视角的前缀体检（网关回的）
+result.prefix     // PrefixReport?：**服务端**视角的前缀体检（后端回的）
 sdk.systemBudget()// 客户端 system 段会不会被服务端截掉（分四段报数）
 ```
 
@@ -529,7 +543,7 @@ sdk.systemBudget()// 客户端 system 段会不会被服务端截掉（分四段
 `result.prefix` 是服务端那边**另起一份独立视角**复核的结论
 （对应一条通用不变量：*the live cache cannot vouch for itself* ——
 活着的缓存自己没法给自己作证）。
-⇒ **App 带 `session_id = …`**，网关据此记住「这个会话上一次请求长什么样」，逐条比对后回传。
+⇒ **App 带 `session_id = …`**，后端据此记住「这个会话上一次请求长什么样」，逐条比对后回传。
 
 实测（真机 + 真实上游）：短问答 6 轮稳定前缀 1408 tokens → 命中率 84~91%；
 把共享头部从 187 字符放大到 3453 字符 + 压住每轮新增后 → **92% → 94% 且仍在涨**；
@@ -692,7 +706,7 @@ agent-text patch notes.md "replace-lines 2 2 新的第二行"          # 只改�
 ```bash
 agent-memory list                        # 有哪些（id / 时间 / 标题 / 字数）
 agent-memory get 20261028-1432           # 读一条正文
-agent-memory search 网关                 # 按关键词找
+agent-memory search 后端                 # 按关键词找
 agent-memory add "用户确认：灌溉阈值按 80"   # 记一条
 agent-memory edit 20261028-1432 "改成：阈值按 60"  # 整条替换
 agent-memory patch 20261028-1432 "replace-lines 2 2 阈值按 60"  # ★ 只改某几行
@@ -1026,7 +1040,7 @@ toybox 的子命令集合跟系统版本走（`awk`/`xxd`/`stat`/`timeout` 都�
 
 实测（真机等价输入，`DevicePromptBudgetTest` 复刻并交叉校验过）：**核心模式 1933 字符**，
 装得进 **2000 的保险线**（余量 ≈ 67 字符，这条线 SDK 自己的回归硬盯着）；
-**完整模式 2403 字符**（网关 client system 上限 6000，装得下）。
+**完整模式 2403 字符**（后端 client system 上限 6000，装得下）。
 
 > ⚠️ 两个「2000」别混：**system 段总长**（提示词+记忆+摘要+告警，服务端参数，默认 6000，可调）
 > vs **提示词本体 < 2000**（SDK 自己的保险线，让提示词在上限被调小时也不被砍）。

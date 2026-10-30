@@ -88,7 +88,7 @@ class EffortCatalogClient(
     private val baseUrl: String,
     private val transport: GetTransport,
     private val auth: LlmAuth = LlmAuth.none(),
-    /** 清单路径。网关不是标准路径时改这里。 */
+    /** 清单路径。后端不是标准路径时改这里。 */
     private val catalogPath: String = "/efforts",
 ) {
 

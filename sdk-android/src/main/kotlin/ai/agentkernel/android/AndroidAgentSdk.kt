@@ -91,7 +91,7 @@ class AndroidAgentSdk(
      * 让 agent 自己看到、自己去清理（而不是去替它删东西）。
      */
     private val workspaceGuard: WorkspaceGuard? = null,
-    /** 宿主补充说明（内部接口约定、网关地址等），会拼进默认系统提示词。 */
+    /** 宿主补充说明（内部接口约定、后端地址等），会拼进默认系统提示词。 */
     private val extraNotes: String = "",
     /**
      * 每次请求的 token 上限（`max_tokens`）。null = 不带这个字段。
@@ -115,7 +115,7 @@ class AndroidAgentSdk(
      * 默认 [AgentSystemPrompt.CommandDetail.FULL]（**完整清单**）——
      * 直连 DeepSeek 官方这类服务没有 system 段字数上限，列全更有用。
      *
-     * 如果你的网关对客户端 system 段有字数上限（实测有网关硬截断到 2000 字符），
+     * 如果你的后端对客户端 system 段有字数上限（实测有后端硬截断到 2000 字符），
      * 就显式传 [AgentSystemPrompt.CommandDetail.CORE] —— 瘦身后装得下，
      * 完整清单仍在技能文档里按需查。
      */
@@ -134,7 +134,7 @@ class AndroidAgentSdk(
     /**
      * 客户端 system 段的**字符上限**（**参与协调**，不只是体检）。
      *
-     * 实测：有些网关会把客户端 system 段**硬截到固定长度**，超了**悄悄砍尾巴** ——
+     * 实测：有些后端会把客户端 system 段**硬截到固定长度**，超了**悄悄砍尾巴** ——
      * 砍掉的正好是排在最后的那几段（工作区告警、会话摘要就排在那儿）。
      * 直连 DeepSeek 官方没这个上限 → 传 null。
      *
@@ -144,7 +144,7 @@ class AndroidAgentSdk(
      * 砍了那叫「模型看不见」，不是「少带点」。
      * 连不可砍的部分都超了 ⇒ 走 [SystemBudget.overflow] **报出来**，不再静默。
      *
-     * 默认 6000（与我们网关的默认上限一致）；换网关就按它的**实际上限**传。
+     * 默认 6000（与后端的默认上限一致）；换后端就按它的**实际上限**传。
      */
     private val systemBudgetLimitChars: Int? = DEFAULT_SYSTEM_BUDGET_LIMIT_CHARS,
     /**
@@ -165,7 +165,7 @@ class AndroidAgentSdk(
      */
     private val inspector: ContextInspector = ContextInspector(),
     /**
-     * 会话标识（发给网关的 `session_id`）。null = 不带。
+     * 会话标识（发给后端的 `session_id`）。null = 不带。
      *
      * 服务端靠它记住「这个会话上一次请求长什么样」，从而**独立**复核
      * 「这一轮是不是上一轮的追加扩展」—— 也就是上游前缀缓存还剩多少。
@@ -193,11 +193,11 @@ class AndroidAgentSdk(
     memoryPolicy: ContextPolicy? = null,
     /**
      * 宿主自己的**提示词文件**（可选）。存在就从文件读，替代 [extraNotes]。
-     * 文件超长会被**截断并记一条日志**（提示词超限会被网关静默砍尾巴）。
+     * 文件超长会被**截断并记一条日志**（提示词超限会被后端静默砍尾巴）。
      *
      * ## 为什么是「文件」而不是又一个字符串参数
      *
-     * 宿主自己的提示词（网关地址、内部接口约定、房规…）通常**很长** ——
+     * 宿主自己的提示词（后端地址、内部接口约定、房规…）通常**很长** ——
      * 长到塞进源码里既难读又难改。所以给它一条路径，让宿主能自己维护那份文本。
      *
      * ## 三条规矩
@@ -207,7 +207,7 @@ class AndroidAgentSdk(
      * - **读不到不炸**：文件不存在 / 读不了 ⇒ 退回 [extraNotes]（少一段提示词而已）；
      * - **超长会截**：上限是 [systemBudgetLimitChars] 的一半（默认 3000 字符），
      *   截了会在 [SystemBudget.promptFileTruncated] 里**留痕** ——
-     *   因为提示词超限只会被网关**静默砍尾巴**，没人知道就等于没发生。
+     *   因为提示词超限只会被后端**静默砍尾巴**，没人知道就等于没发生。
      */
     private val promptFile: File? = null,
 ) {
@@ -420,7 +420,7 @@ class AndroidAgentSdk(
     /**
      * 客户端 system 段的**长度体检**（数字与 [runTurn] 实际发出的**同一份**）。
      *
-     * 网关会把客户端 system 段**截到固定长度**（实测），超了**悄悄砍尾巴**。
+     * 后端会把客户端 system 段**截到固定长度**（实测），超了**悄悄砍尾巴**。
      * 系统提示词本来就占了大半，再加一条告警、摘要、记忆就可能超 ——
      * 超了等于**那几段根本到不了模型**（模型看不见，却没人知道）。
      * 这个数必须看得见。
@@ -430,11 +430,11 @@ class AndroidAgentSdk(
      * | 字段 | 含义 |
      * |---|---|
      * | [SystemBudget.totalChars] | 这一轮**实际**会发出去多少字符 |
-     * | [SystemBudget.over] | 实际超了 ⇒ 网关会截（要处理） |
+     * | [SystemBudget.over] | 实际超了 ⇒ 后端会截（要处理） |
      * | [SystemBudget.overflow] | **把记忆砍光也装不下** ⇒ 提示词本身太大（要改配置） |
      * | [SystemBudget.toolsChars] | 工具定义段占多少字符（**不在** system 段里，但同样占请求体；**只取决于工具集**） |
      *
-     * @param limitChars 网关的 system 段上限；null = 不检查（直连官方 API）。
+     * @param limitChars 后端的 system 段上限；null = 不检查（直连官方 API）。
      */
     fun systemBudget(limitChars: Int? = systemBudgetLimitChars): SystemBudget {
         val parts = coordinatePrefix(limitChars)
@@ -500,7 +500,7 @@ class AndroidAgentSdk(
             else -> 0
         }
 
-        // 分隔符：网关把多条 system 段用**空行**拼起来，空行也占 2 个字符。
+        // 分隔符：后端把多条 system 段用**空行**拼起来，空行也占 2 个字符。
         val plannedSegments =
             (if (prompt != null) 1 else 0) +
                 (if (mem != null) 1 else 0) + // 假设记忆会在（预算不够时它会被砍掉）
@@ -579,7 +579,7 @@ class AndroidAgentSdk(
             /**
              * 多段 system 拼起来的总字符数。
              *
-             * 网关用**空行**拼 system 段 ⇒ 每多一段就多 2 个字符。
+             * 后端用**空行**拼 system 段 ⇒ 每多一段就多 2 个字符。
              */
             fun joinChars(vararg lens: Int): Int {
                 val kept = lens.filter { it > 0 }
@@ -665,14 +665,14 @@ class AndroidAgentSdk(
         /**
          * 客户端 system 段的**默认**字符上限。
          *
-         * 与我们网关的 `client_system_max_chars` 默认值一致（6000）。
+         * 与后端的 `client_system_max_chars` 默认值一致（6000）。
          *
          * ★ **别再改回 2000**：真机设备提示词本身就占 1883 字符，老值 2000 会把
          * 长期记忆 digest / 会话摘要 / 工作区告警**全砍掉** ——
-         * 而网关不报错（只是悄悄砍尾巴）⇒ agent 写了记忆、模型压根没看见。
+         * 而后端不报错（只是悄悄砍尾巴）⇒ agent 写了记忆、模型压根没看见。
          *
-         * 网关那一侧的值是**可调参数**（后端 AI 用 `ai_gateway_set` 改，3 秒生效）。
-         * 换网关就按它的**实际上限**传 [AndroidAgentSdk.systemBudgetLimitChars]。
+         * 后端那一侧的值是**可调参数**（后端 AI 用 `ai_gateway_set` 改，3 秒生效）。
+         * 换后端就按它的**实际上限**传 [AndroidAgentSdk.systemBudgetLimitChars]。
          */
         const val DEFAULT_SYSTEM_BUDGET_LIMIT_CHARS = 6000
 
@@ -817,7 +817,7 @@ class AndroidAgentSdk(
          * 在这台设备上真的存在、路径对不对。
          *
          * @param commandDetail 命令清单写多少（默认 [AgentSystemPrompt.CommandDetail.FULL]，
-         *   即完整清单；只有当你的网关对 system 段有字数上限时才改用
+         *   即完整清单；只有当你的后端对 system 段有字数上限时才改用
          *   [AgentSystemPrompt.CommandDetail.CORE]）
          * @return null = 拿不到布局（执行器不是 [AndroidCommandExecutor]）
          */
@@ -840,7 +840,7 @@ class AndroidAgentSdk(
         }
 
         /**
-         * **一行接上 DeepSeek 官方**（不需要自建网关）。
+         * **一行接上 DeepSeek 官方**（不需要自建后端）。
          *
          * 这是**面向外部使用者**的入口：地址用 DeepSeek 官方、鉴权用 `Authorization: Bearer`、
          * 执行器按宿主 Context 装配、系统提示词由 SDK 自己生成（**完整自带**，
@@ -889,7 +889,7 @@ class AndroidAgentSdk(
              * 思考强度的**线格式**（见 [ai.agentkernel.llm.openai.ReasoningWire]）。
              *
              * 默认按地址自动选：DeepSeek 官方 ⇒ 官方形状（`thinking`）；
-             * 其它地址（自建网关）⇒ 网关形状（`reasoning_strength`）。
+             * 其它地址（自建后端）⇒ 自备后端形状（`reasoning_strength`）。
              */
             reasoningWire: ReasoningWire = if (baseUrl == ChatCompletionsClient.DEEPSEEK_BASE_URL) {
                 ReasoningWire.DEEPSEEK
@@ -927,14 +927,14 @@ class AndroidAgentSdk(
 /**
  * 客户端 system 段的**长度体检**（见 [AndroidAgentSdk.systemBudget]）。
  *
- * 超了不会报错 —— 只会被网关**悄悄截断**，而截掉的那段（工作区告警、会话摘要、
+ * 超了不会报错 —— 只会被后端**悄悄截断**，而截掉的那段（工作区告警、会话摘要、
  * 长期记忆）模型就再也看不到了。所以这个数必须**看得见**，
  * 别让它变成一个没人发现的静默故障。
  *
  * @param promptChars 系统提示词的字符数。
  * @param alertChars 工作区告警的字符数（没有告警时为 0）。
  * @param totalChars 这一轮**实际**会发出去的总字符数（含分段之间的空行）。
- * @param limitChars 网关的 system 段上限；null = 不知道上限（直连官方 API）。
+ * @param limitChars 后端的 system 段上限；null = 不知道上限（直连官方 API）。
  * @param memoryChars 长期记忆 digest 的字符数（协调后实际带上的）。
  * @param summaryChars 会话摘要（标题 + 正文）的字符数。
  * @param reservedSummaryChars 协调时为「会话摘要」**预留**的字符数
@@ -964,7 +964,7 @@ class AndroidAgentSdk(
  *      ⇒ 宿主**绕过 agent 路径**直接构造它时，**本数 ≠ 线上 `tools` 段长度**。
  *
  *   出现差异只有这几种可能：**工具集不同** / 对方**不是本 SDK 客户端**（多塞或少塞字段）/
- *   **归一规则不同**（换网关）/ **两侧序列化器不同**（见 ①）。
+ *   **归一规则不同**（换后端）/ **两侧序列化器不同**（见 ①）。
  *   ⚠️ **未知字段不是原因** —— 两边数的都是归一后的三字段形状，**都不含**客户端塞的未知字段。
  *   顺序**不产生**差异（两边都按工具名字典序排）。
  *   ⚠️ **这个数只取决于工具集、与对话无关** ⇒ 它对上了，**不能**推出

@@ -104,6 +104,61 @@ object CredentialCipherLoader {
     /** 当前是否已注入实现（宿主 UI 可以据此决定「凭据设置」入口要不要亮）。 */
     fun isAvailable(): Boolean = registered != null || registeredClassName != null
 
+    /**
+     * **显式启用明文凭据实现**（`[PlaintextCredentialCipher]`）。
+     *
+     * ## 什么时候才用
+     *
+     * 设备上**没有 Android Keystore** 的环境（桌面 JVM、CI、单元测试、某些特殊 ROM）
+     * ⇒ 闭源加密实现用不了 ⇒ 凭据功能只能 fail-closed（**整个跑不起来**）。
+     * 本方法是给这些环境留的**显式 opt-in** 通道。
+     *
+     * ## ⚠️ 代价（宿主必须自己扛）
+     *
+     * 落盘就是明文（凭据文件里的 `blob` 是明文的 base64 —— base64 **不是**加密），
+     * 而且**不提供 AAD 绑定与完整性** ⇒ 宿主界面必须**红字提示**、使用凭据的动作要带**审计标注**。
+     *
+     * ## ★ 不静默降级
+     *
+     * 已注册**任何**实现（真实加密实现，或已经是明文实现）⇒ 本方法**抛 [CredentialException]**，
+     * **不覆盖**。把已加密的凭据降级成明文是最危险的一步 ⇒ 必须响亮失败。
+     * 要换实现请先 [reset]。
+     *
+     * **默认行为不变**：没调本方法 ⇒ [resolve] 照旧抛异常 ⇒ **fail-closed 不削弱**。
+     */
+    fun registerPlaintext() {
+        if (registered != null || registeredClassName != null) {
+            throw CredentialException(
+                "已注册凭据实现 ⇒ 拒绝切换到明文模式"
+                    + "（把已加密的凭据降级成明文是最危险的一步；要换实现请先 reset()）"
+            )
+        }
+        registered = PlaintextCredentialCipher()
+        registeredClassName = null
+        resolved = null
+    }
+
+    /**
+     * 当前是否处于**明文模式**（宿主做 UI 红提示与审计标注的唯一判据）。
+     *
+     * ## 判定口径：**看当前实际用的那个实现是什么类型**，不是粘滞标志
+     *
+     * - 现在注册的是 [PlaintextCredentialCipher] ⇒ true；
+     * - 之后 [register] 了真实加密实现 ⇒ **自动变回 false**（状态跟着实际实现走）；
+     * - [reset] 之后 ⇒ false（回到 fail-closed）。
+     *
+     * ⚠️ **别用「有没有调过 registerPlaintext」来判** —— 那是个粘滞标志：
+     * 换成真实实现之后它还写着 true ⇒ 宿主界面会一直挂着「明文存储」的红字（假警报），
+     * 或者反过来漏报（更糟）。判定必须落在**实际实例的类型**上。
+     */
+    fun isPlaintextMode(): Boolean {
+        registered?.let { return it is PlaintextCredentialCipher }
+        resolved?.let { return it is PlaintextCredentialCipher }
+        // 按类名注册的：只有明文实现会走这条路（闭源产物不是它）⇒ 类名对上就是明文模式。
+        val className = registeredClassName ?: return false
+        return className.substringAfterLast('.') == PlaintextCredentialCipher::class.java.simpleName
+    }
+
     /** 清空注册（测试用；宿主不该在运行期调它）。 */
     fun reset() {
         registered = null

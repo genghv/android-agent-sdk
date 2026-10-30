@@ -24,10 +24,10 @@ import kotlin.test.assertTrue
  *
  * ## 为什么这组测试必须有
  *
- * 我们的主契约是**强度编码**（2 的幂），但 `reasoning_strength` 是**我们网关的私有字段**：
- * 网关按该模型的目录，把编码翻译成厂商档位。
+ * 宿主本地保存的是**强度编码**（2 的幂），但 `reasoning_strength` 是**扩展字段**：
+ * 由自备后端自行解释（不是厂商标准字段）。
  *
- * **直连厂商官方时，网关那一层根本不存在** ⇒ 编码没人翻译 ⇒
+ * **直连厂商官方时，这一层根本不存在** ⇒ 编码没人翻译 ⇒
  * 厂商要么忽略这个未知字段、要么 400。
  * 多数厂商**忽略**未知字段 ⇒ **不报错、用户拖了滑块以为设了、其实没变** ——
  * 这比报错更糟（报错至少有人知道）。
@@ -38,7 +38,7 @@ import kotlin.test.assertTrue
  * 也就是说，**只有真出事时才会被发现**。
  *
  * ⇒ 这里把三件事钉死：
- * 1. **网关形状**（默认）：`reasoning_strength` = 整数编码 —— 既有调用方零影响；
+ * 1. **自备后端形状**（默认）：`reasoning_strength` = 整数编码 —— 既有调用方零影响；
  * 2. **厂商形状**：只发厂商认识的字段，**绝不发** `reasoning_strength`；
  * 3. **强度没设就什么都不发**（三种形状都一样）。
  */
@@ -85,15 +85,15 @@ class ReasoningWireTest {
         return bodyOf(transport)
     }
 
-    // ---------- 网关形状（默认，既有调用方零影响）----------
+    // ---------- 自备后端形状（默认，既有调用方零影响）----------
 
     @Test
-    fun `默认是网关形状：强度编码原样下发`() = runBlocking {
+    fun `默认是自备后端形状：强度编码原样下发`() = runBlocking {
         val body = send(wire = null, strength = 8)
 
         assertEquals(8, body["reasoning_strength"]!!.jsonPrimitive.content.toInt())
-        assertFalse(body.containsKey("thinking"), "网关形状不该发厂商字段")
-        assertFalse(body.containsKey("reasoning_effort"), "网关形状不该发厂商字段")
+        assertFalse(body.containsKey("thinking"), "自备后端形状不该发厂商字段")
+        assertFalse(body.containsKey("reasoning_effort"), "自备后端形状不该发厂商字段")
     }
 
     // ---------- 厂商形状 ----------
@@ -165,7 +165,7 @@ class ReasoningWireTest {
         assertEquals("low", send(wire = ReasoningWire.OPENAI, strength = 2)["reasoning_effort"]!!.jsonPrimitive.content)
         assertEquals("medium", send(wire = ReasoningWire.OPENAI, strength = 4)["reasoning_effort"]!!.jsonPrimitive.content)
         assertEquals("high", send(wire = ReasoningWire.OPENAI, strength = 8)["reasoning_effort"]!!.jsonPrimitive.content)
-        // OpenAI 没有比 high 更高的档 ⇒ 16/32 落到 high（与网关那套「只向下」一致）。
+        // OpenAI 没有比 high 更高的档 ⇒ 16/32 落到 high（与后端那套「只向下」一致）。
         assertEquals("high", send(wire = ReasoningWire.OPENAI, strength = 16)["reasoning_effort"]!!.jsonPrimitive.content)
         assertEquals("high", send(wire = ReasoningWire.OPENAI, strength = 32)["reasoning_effort"]!!.jsonPrimitive.content)
     }
@@ -194,11 +194,11 @@ class ReasoningWireTest {
         val body = bodyOf(transport)
         assertTrue(body.containsKey("thinking"), "官方地址 ⇒ 官方形状（thinking）")
         assertTrue(body.containsKey("reasoning_effort"), "官方形状：开关与强度两个独立参数都要发")
-        assertFalse(body.containsKey("reasoning_strength"), "官方地址不该发网关私有字段")
+        assertFalse(body.containsKey("reasoning_strength"), "官方地址不该发扩展字段 reasoning_strength")
     }
 
     @Test
-    fun `deepSeek 工厂：换成自建网关地址则保持网关形状`() = runBlocking {
+    fun `deepSeek 工厂：换成自建后端地址则保持自备后端形状`() = runBlocking {
         val transport = FakeTransport(okResponse)
         val client = ChatCompletionsClient.deepSeek(
             apiKey = "sk-test",
@@ -210,7 +210,7 @@ class ReasoningWireTest {
 
         val body = bodyOf(transport)
         assertEquals(8, body["reasoning_strength"]!!.jsonPrimitive.content.toInt())
-        assertFalse(body.containsKey("thinking"), "自建网关 ⇒ 网关形状（与以前一样）")
+        assertFalse(body.containsKey("thinking"), "自建后端 ⇒ 自备后端形状（与以前一样）")
     }
 
     // ---------- 宿主的 extra 仍然能覆盖 ----------

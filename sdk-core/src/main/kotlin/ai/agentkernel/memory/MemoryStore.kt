@@ -265,7 +265,7 @@ class MemoryStore(private val root: File) {
     /**
      * 按关键词搜记忆（标题或正文命中，**不区分大小写**）。
      *
-     * agent 想找「之前聊过网关那次」时用这个 —— 比自己 grep 目录稳
+     * agent 想找「之前聊过后端那次」时用这个 —— 比自己 grep 目录稳
      * （正文在磁盘上的布局是实现细节，不该让模型知道）。
      *
      * @return 命中的条目，按 [MemoryEntry.createdAt] **倒序**（新的在前）。

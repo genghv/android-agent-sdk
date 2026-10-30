@@ -88,7 +88,7 @@ data class VendorEffortProfile(
  * | 来源 | 什么时候用 | 拿不到怎么办 |
  * |---|---|---|
  * | [EffortProfileSource.USER] | 宿主自己有权威来源 | —— |
- * | [EffortProfileSource.SERVER] | 网关给了模型级清单（`GET /efforts`） | **落回 BUILTIN** |
+ * | [EffortProfileSource.SERVER] | 后端给了模型级清单（`GET /efforts`） | **落回 BUILTIN** |
  * | [EffortProfileSource.BUILTIN] | 兜底（离线可用） | —— |
  *
  * ⚠️ **服务端拉不到时必须落回 BUILTIN，不能让宿主起不来** ——
@@ -235,9 +235,9 @@ object VendorEffortProfiles {
     )
 
     /**
-     * 我方网关的档案。
+     * 自备后端的档案。
      *
-     * 网关**自己**按模型目录把编码翻译成厂商档位 ⇒ 这边**没有厂商侧档位名**
+     * 后端**自己**按模型目录把编码翻译成厂商档位 ⇒ 这边**没有厂商侧档位名**
      * ⇒ [VendorEffortProfile.levelNames] 是空的（编码原样转发，翻译发生在服务端）。
      */
     val GATEWAY: VendorEffortProfile = VendorEffortProfile(

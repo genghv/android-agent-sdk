@@ -22,7 +22,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
- * OpenAI Chat Completions 兼容客户端。DeepSeek / 各家兼容网关都走这套线格式。
+ * OpenAI Chat Completions 兼容客户端。DeepSeek / 各类 OpenAI 兼容服务都走这套线格式。
  *
  * 职责（= 内核的「协议级解析」部分，必须留内核）：
  * - 组装请求体（model / messages / tools / max_tokens / 透传字段）；
@@ -31,7 +31,7 @@ import kotlinx.serialization.json.put
  *
  * 不做：历史拼接、system prompt 组装、业务数据加工。
  *
- * ## 换网关要改什么
+ * ## 换服务地址要改什么
  *
  * **线格式一个字都不用改** —— 请求体、响应解析、流式聚合全是 OpenAI 那套。
  * 要改的只有两处：
@@ -45,18 +45,18 @@ class ChatCompletionsClient(
     private val transport: Transport,
     /** 鉴权方式。默认不带鉴权头；用 [LlmAuth.bearer] 等工厂方法构造。 */
     private val auth: LlmAuth = LlmAuth.none(),
-    /** 额外请求头（网关自定义的、跟鉴权无关的头）。 */
+    /** 额外请求头（后端自定义的、跟鉴权无关的头）。 */
     private val extraHeaders: Map<String, String> = emptyMap(),
     /** chat 端点的路径。服务若不是标准路径，改这里。 */
     private val chatPath: String = "/chat/completions",
     /**
      * 「思考强度」用**哪种线格式**发出去（默认 [ReasoningWire.GATEWAY]）。
      *
-     * `reasoning_strength` 是**我们网关的私有字段**：网关按该模型的目录把编码翻译成厂商档位。
+     * `reasoning_strength` 是**扩展字段**：由自备后端自行解释（不是厂商标准字段）。
      * **直连厂商官方时那一层不存在** ⇒ 编码没人翻译 ⇒ 厂商要么忽略、要么 400
      * （多数厂商忽略 ⇒ **静默不生效**，比报错更糟）。
      *
-     * 走我们的网关 ⇒ 不用管；直连 DeepSeek 官方 ⇒ [ReasoningWire.DEEPSEEK]；
+     * 用自备后端 ⇒ 不用管；直连 DeepSeek 官方 ⇒ [ReasoningWire.DEEPSEEK]；
      * 直连 OpenAI 系 ⇒ [ReasoningWire.OPENAI]。拿不准就**显式写出来**。
      */
     private val reasoningWire: ReasoningWire = ReasoningWire.GATEWAY,
@@ -77,7 +77,7 @@ class ChatCompletionsClient(
         /**
          * 思考强度的线格式（见 [ReasoningWire]）。
          *
-         * **直连厂商官方时要换** —— `reasoning_strength` 是网关私有字段，
+         * **直连厂商官方时要换** —— `reasoning_strength` 是**扩展字段**（由自备后端自行解释），
          * 发给厂商只会被忽略或 400（**静默不生效**）。
          */
         reasoningWire: ReasoningWire = ReasoningWire.GATEWAY,
@@ -100,9 +100,9 @@ class ChatCompletionsClient(
         /**
          * 地址是不是 **DeepSeek 官方**（**按域名**判，不看路径、不看端口、不看大小写）。
          *
-         * - 官方域名 ⇒ 自动用 [ReasoningWire.DEEPSEEK]（**修复**：此前发的是网关私有字段，
+         * - 官方域名 ⇒ 自动用 [ReasoningWire.DEEPSEEK]（**修复**：此前发的是扩展字段 `reasoning_strength`，
          *   厂商不认 ⇒ 忽略 ⇒ 静默不生效）；
-         * - 其它一切地址（自建网关、代理、别的厂商）⇒ 保持 [ReasoningWire.GATEWAY]（**零破坏**）。
+         * - 其它一切地址（自建后端、代理、别的厂商）⇒ 保持 [ReasoningWire.GATEWAY]（**零破坏**）。
          *
          * ⚠️ **只影响「没显式指定 `reasoningWire`」的调用方** —— 显式传了的**一律不受影响**。
          */
@@ -133,8 +133,8 @@ class ChatCompletionsClient(
              *
              * **默认按地址自动选**：地址是 **DeepSeek 官方域名** ⇒ [ReasoningWire.DEEPSEEK]
              * （官方形状发的是 `thinking` ＋ `reasoning_effort`，见 [ReasoningWire]；
-             *   `reasoning_strength` 是**网关形状**的字段名，直连厂商不认它 ⇒ 忽略或 400）；
-             * 换成别的地址（自建网关）⇒ 保持 [ReasoningWire.GATEWAY]（与以前一样）。
+             *   `reasoning_strength` 是**自备后端形状**的字段名，直连厂商不认它 ⇒ 忽略或 400）；
+             * 换成别的地址（自建后端）⇒ 保持 [ReasoningWire.GATEWAY]（与以前一样）。
              */
             reasoningWire: ReasoningWire = if (isDeepSeekOfficial(baseUrl)) {
                 ReasoningWire.DEEPSEEK
@@ -154,11 +154,11 @@ class ChatCompletionsClient(
     /**
      * 内核走**流式**。
      *
-     * 为什么不是非流式：DeepSeek 官方与各家兼容网关的**生产链路全程都是
+     * 为什么不是非流式：DeepSeek 官方与各类 OpenAI 兼容服务的**生产链路全程都是
      * `stream: true` + `accept: text/event-stream`** —— 那是唯一被真实服务校验过的形态，
      * SDK 自己发 `stream:false` 属于没验过的路径。
      *
-     * 想用非流式可以显式调 [completeNonStreaming]（少数网关只支持它）。
+     * 想用非流式可以显式调 [completeNonStreaming]（少数后端只支持它）。
      */
     override suspend fun complete(request: ChatRequest): AssistantMessage = completeStreaming(request)
 
@@ -314,9 +314,9 @@ class ChatCompletionsClient(
             put("stream_options", buildJsonObject { put("include_usage", true) })
         }
         // 思考强度：**主契约是强度编码**（2 的幂，跨模型稳定 —— 换模型不用改用户存的值）。
-        // 不传 = 服务端用它的默认档位（省一次往返，也让网关的默认策略生效）。
+        // 不传 = 服务端用它的默认档位（省一次往返，也让后端的默认策略生效）。
         // ★ 发出去的**形状**看对端是谁（见 [ReasoningWire]）：
-        //   网关吃 `reasoning_strength`；直连厂商官方时它是个**没人翻译的私有字段**
+        //   自备后端吃 `reasoning_strength`；直连厂商官方时它是个**没人翻译的私有字段**
         //   ⇒ 厂商要么忽略、要么 400 ⇒ 静默不生效。
         reasoningWire.putStrength(this, request.reasoningStrength)
         // 会话标识:让服务端能独立复核「这一轮是不是上一轮的追加扩展」(前缀缓存的前提)。
@@ -379,7 +379,7 @@ class ChatCompletionsClient(
      *
      * - **OpenAI / DeepSeek 原生**：`prompt_tokens` 是**输入总量**，
      *   命中数在 `prompt_cache_hit_tokens`（或 `prompt_tokens_details.cached_tokens`）；
-     * - **部分网关**（含内核的 disjoint 约定）：`prompt_tokens` 报的是**未命中**的部分。
+     * - **部分后端**（含内核的 disjoint 约定）：`prompt_tokens` 报的是**未命中**的部分。
      *
      * 两种都见过，所以这里做归一：命中数 > `prompt_tokens` 时，说明后者是「未命中」口径，
      * 总量 = 两者之和。**宁可算保守，也不谎报命中率。**

@@ -26,14 +26,14 @@ class MemoryStoreTest {
     @Test
     fun `追加之后能列出来`() {
         val store = MemoryStore(tempDir())
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "用户在配网关"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "用户在配后端"))
         store.append(MemoryEntry("20261028-1100", 2_000L, "改提示词", "提示词要瘦身"))
 
         val all = store.list()
         assertEquals(2, all.size)
         // 新的在前
         assertEquals("改提示词", all[0].title)
-        assertEquals("配网关", all[1].title)
+        assertEquals("配后端", all[1].title)
     }
 
     @Test
@@ -49,12 +49,12 @@ class MemoryStoreTest {
     @Test
     fun `摘要块带的是正文不是只有标题`() {
         val store = MemoryStore(tempDir())
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "事实：用户的网关在 8080 端口"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "事实：用户的后端在 8080 端口"))
 
         val digest = store.digest(1_500)
         assertNotNull(digest)
         // 标题和正文都得在 —— 模型得知道结论是什么
-        assertTrue(digest.contains("配网关"), "摘要块要带标题：$digest")
+        assertTrue(digest.contains("配后端"), "摘要块要带标题：$digest")
         assertTrue(digest.contains("8080"), "摘要块要带正文：$digest")
     }
 
@@ -78,7 +78,7 @@ class MemoryStoreTest {
     fun `索引丢了能从正文目录重建`() {
         val dir = tempDir()
         val store = MemoryStore(dir)
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "正文"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "正文"))
 
         // 索引损坏（模拟：直接删掉）
         File(dir, "index.json").delete()
@@ -122,7 +122,7 @@ class MemoryStoreTest {
     @Test
     fun `删掉之后列表里没有它且读不到正文`() {
         val store = MemoryStore(tempDir())
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "用户在配网关"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "用户在配后端"))
         store.append(MemoryEntry("20261028-1100", 2_000L, "改提示词", "提示词要瘦身"))
 
         assertTrue(store.delete("20261028-1000"))
@@ -139,7 +139,7 @@ class MemoryStoreTest {
     @Test
     fun `按关键词搜标题和正文且不区分大小写`() {
         val store = MemoryStore(tempDir())
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "用户在配 Gateway，端口 8080"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "用户在配 Gateway，端口 8080"))
         store.append(MemoryEntry("20261028-1100", 2_000L, "改提示词", "提示词要瘦身"))
 
         // 标题命中
@@ -154,12 +154,12 @@ class MemoryStoreTest {
     @Test
     fun `搜出来的结果按时间倒序`() {
         val store = MemoryStore(tempDir())
-        store.append(MemoryEntry("20261028-1000", 1_000L, "配网关", "网关在 8080"))
-        store.append(MemoryEntry("20261028-1100", 2_000L, "换网关", "网关搬到 9090"))
+        store.append(MemoryEntry("20261028-1000", 1_000L, "配后端", "后端在 8080"))
+        store.append(MemoryEntry("20261028-1100", 2_000L, "换后端", "后端搬到 9090"))
 
-        val hits = store.search("网关")
+        val hits = store.search("后端")
         assertEquals(2, hits.size)
-        assertEquals("换网关", hits.first().title, "新的在前")
+        assertEquals("换后端", hits.first().title, "新的在前")
     }
 
     // ---- 每日摘要槽 ----
@@ -369,8 +369,8 @@ class MemoryStoreTest {
     @Test
     fun `摘要块分两块且形状固定`() {
         val store = MemoryStore(tempDir())
-        store.upsertDaily("20261029", "今天的标题", "今天聊了网关")
-        store.append(MemoryEntry("20261029-1000", 1_000L, "配网关", "用户的网关在 8080"))
+        store.upsertDaily("20261029", "今天的标题", "今天聊了后端")
+        store.append(MemoryEntry("20261029-1000", 1_000L, "配后端", "用户的后端在 8080"))
 
         val digest = store.digest(2_000)!!
         assertEquals(
@@ -378,11 +378,11 @@ class MemoryStoreTest {
             ## 你之前和用户聊过什么（长期记忆）
 
             ### 今天的摘要
-            今天聊了网关
+            今天聊了后端
 
             ### 你自己记下的事
-            - [${dateLabel(1_000L)}] 配网关
-              用户的网关在 8080
+            - [${dateLabel(1_000L)}] 配后端
+              用户的后端在 8080
             """.trimIndent(),
             digest,
         )
@@ -391,13 +391,13 @@ class MemoryStoreTest {
     @Test
     fun `预算不够时先砍日常条目`() {
         val store = MemoryStore(tempDir())
-        store.upsertDaily("20261029", "今天的标题", "今天聊了网关")
+        store.upsertDaily("20261029", "今天的标题", "今天聊了后端")
         store.append(MemoryEntry("n1", 1_000L, "旧条目", "旧正文".repeat(50)))
 
         val digest = store.digest(120)!!
 
         assertTrue(digest.contains("### 今天的摘要"), "摘要那一块要保住：$digest")
-        assertTrue(digest.contains("今天聊了网关"), "摘要正文要保住：$digest")
+        assertTrue(digest.contains("今天聊了后端"), "摘要正文要保住：$digest")
         assertTrue(!digest.contains("旧正文"), "日常条目的正文要先让位：$digest")
         assertTrue(!digest.contains(MemoryStore.TRUNCATION_MARKER), "不该动摘要正文：$digest")
         assertTrue(digest.length <= 120, "整块不能超预算，实际 ${digest.length}")
@@ -406,12 +406,12 @@ class MemoryStoreTest {
     @Test
     fun `预算太小时日常条目整块消失但摘要还在`() {
         val store = MemoryStore(tempDir())
-        store.upsertDaily("20261029", "今天的标题", "今天聊了网关")
+        store.upsertDaily("20261029", "今天的标题", "今天聊了后端")
         store.append(MemoryEntry("n1", 1_000L, "旧条目", "旧正文"))
 
         val digest = store.digest(60)!!
 
-        assertTrue(digest.contains("今天聊了网关"), "摘要正文要保住：$digest")
+        assertTrue(digest.contains("今天聊了后端"), "摘要正文要保住：$digest")
         assertTrue(!digest.contains("旧条目"), "放不下就连标题都不给：$digest")
         assertTrue(!digest.contains("### 你自己记下的事"), "空的日常段不该留标题：$digest")
         assertTrue(digest.length <= 60, "整块不能超预算，实际 ${digest.length}")
@@ -472,7 +472,7 @@ class MemoryStoreTest {
 }
 
 /** 假模型客户端：只回一句固定的摘要，并记录收到的请求。 */
-internal class FakeLlm(private val reply: String = "摘要：用户在配网关") : LlmClient {
+internal class FakeLlm(private val reply: String = "摘要：用户在配后端") : LlmClient {
     val requests = mutableListOf<ChatRequest>()
 
     override suspend fun complete(request: ChatRequest): AssistantMessage {

@@ -33,15 +33,15 @@ object AgentSystemPrompt {
     /**
      * 命令清单在提示词里写多少。
      *
-     * 为什么要分两档：**很多网关对客户端 system 段有字数上限**，
-     * 实测有网关硬截断到 2000 字符（`clientSystem.trim().slice(0, 2000)`）——
+     * 为什么要分两档：**很多后端对客户端 system 段有字数上限**，
+     * 实测有后端硬截断到 2000 字符（`clientSystem.trim().slice(0, 2000)`）——
      * 而被砍掉的是提示词**尾部**，正好是「能力清单」和「工作区维护规则」这两段最要命的内容。
      *
      * - [CORE]（默认）只写**高频核心**命令（仍然白名单 ∩ 实存），完整清单放技能文档里按需查；
      * - [FULL] 写全部探测到的命令。
      */
     enum class CommandDetail {
-        /** 只列核心命令 —— 提示词要装进网关预算时用这个。 */
+        /** 只列核心命令 —— 提示词要装进后端预算时用这个。 */
         CORE,
 
         /** 列出全部探测到的命令。 */
@@ -57,7 +57,7 @@ object AgentSystemPrompt {
      * @param shellInventory 运行时探测到的、这台设备上**确实存在**的 shell 命令；
      *   null = 用一份静态默认清单（只在拿不到设备信息时用）
      * @param commandDetail 命令清单写多少（默认 [CommandDetail.CORE]）
-     * @param extraNotes 宿主自己的补充说明（网关地址、内部接口约定等）
+     * @param extraNotes 宿主自己的补充说明（后端地址、内部接口约定等）
      */
     fun build(
         layout: PrefixLayout,
@@ -71,7 +71,7 @@ object AgentSystemPrompt {
         appendLine()
         // 环境段只写**一次**绝对路径（工作区根），子路径一律用环境变量拼。
         //
-        // 为什么：网关的 system 段有字数上限（实测有网关硬截断到 2000 字符），
+        // 为什么：后端的 system 段有字数上限（实测有后端硬截断到 2000 字符），
         // 而每条绝对路径都要重复 40+ 字符 —— 写七遍就是三百多字符，
         // 砍掉的正好是「能力清单」和「工作区维护规则」这两段更要命的内容。
         //
@@ -132,7 +132,7 @@ object AgentSystemPrompt {
         appendLine()
         if (capabilities != null) {
             // ★ 核心模式用**短用法**：完整参数形态一行能到上百字符（agent-memory 那种），
-            //   而核心模式存在的意义就是「装进两千字符的网关预算」——
+            //   而核心模式存在的意义就是「装进两千字符的后端预算」——
             //   写详细了装不下，删掉这条能力更糟（模型压根不知道它存在）。
             //   完整形态让模型按需问命令（能力失败时会把完整用法回给它）或查技能文档。
             val byOrigin = capabilities.describeByOrigin(short = commandDetail == CommandDetail.CORE)

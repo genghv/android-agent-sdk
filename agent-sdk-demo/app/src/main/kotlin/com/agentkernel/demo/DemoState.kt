@@ -30,6 +30,7 @@ import ai.agentkernel.protocol.ToolMessage
 import ai.agentkernel.protocol.UserMessage
 import android.app.Application
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.runtime.getValue
@@ -259,11 +260,60 @@ class DemoState(app: Application) : AndroidViewModel(app) {
         return client to memory
     }
 
+    // ---- 凭据存储模式（**明文出口**；只在可调试构建里暴露） ----
+
+    /**
+     * ★ **明文模式**能不能用（v1.1.26 SDK 的 `registerPlaintext()`）。
+     *
+     * ## 判定口径
+     * 看**可调试标记**（`FLAG_DEBUGGABLE`）⇒ `assembleDebug` 开着、`assembleRelease` 没有 ——
+     * 正式构建里**连入口都不给**（不是「给了但藏起来」）。
+     *
+     * ## 为什么正式构建不给
+     * 明文模式 = **拿到凭据文件就能还原 key**（且不绑 AAD、不验完整性）⇒ 只适合开发调试。
+     */
+    val plaintextModeAvailable: Boolean =
+        (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    /** 明文模式开关（**重启后生效** —— 注册是进程级的）。 */
+    var plaintextMode by mutableStateOf(prefs.getBoolean(KEY_PLAINTEXT_MODE, false))
+        private set
+
+    /**
+     * 打开/关掉明文模式（**要重启应用才生效**）。
+     *
+     * ⚠️ 函数名**不叫** `setPlaintextMode` —— 属性 `plaintextMode` 的 setter 会生成
+     * `setPlaintextMode(Z)V`，同名函数会**撞 JVM 签名**（编译期直接报 Platform declaration clash）。
+     */
+    fun applyPlaintextMode(enabled: Boolean) {
+        if (enabled && !plaintextModeAvailable) return
+        plaintextMode = enabled
+        prefs.edit().putBoolean(KEY_PLAINTEXT_MODE, enabled).apply()
+        log(
+            "CRED",
+            "明文模式开关：${if (enabled) "开（凭据未加密落盘 · 仅开发调试）" else "关"} · **重启应用后生效**",
+        )
+    }
+
     init {
         // ★ 注册闭源加密实现（**按类名**）。
         //   没有那个 `.aar` 时这里**照样成功**（注册只是记下类名）；
         //   真正解析要等到读写凭据时 —— 那时才会**安全失败**（抛异常，不退回明文）。
-        CredentialCipherLoader.register(cipherClassName)
+        // ★ v1.1.26：**明文模式是显式 opt-in**，且「已注册任何实现 ⇒ 再注册就抛」⇒
+        //   两条路**二选一**（明文模式下**不**注册闭源实现）。
+        if (plaintextMode && plaintextModeAvailable) {
+            try {
+                CredentialCipherLoader.registerPlaintext()
+                log(
+                    "CRED",
+                    "★ 明文模式已启用：凭据**未加密**落盘（拿到凭据文件就能还原 key）· 仅开发调试",
+                )
+            } catch (e: Throwable) {
+                log("CRED", "★ 明文模式注册失败：${e.javaClass.simpleName}: ${e.message}")
+            }
+        } else {
+            CredentialCipherLoader.register(cipherClassName)
+        }
 
         systemPrompt = AndroidAgentSdk.buildSystemPrompt(
             executor = executor,
@@ -273,7 +323,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
         ) ?: ""
     }
 
-    // ---- 网关配置（运行时填，不打包进 APK） ----
+    // ---- 后端配置（运行时填，不打包进 APK） ----
 
     var gatewayUrl by mutableStateOf(prefs.getString(KEY_URL, "") ?: "")
     var gatewayToken by mutableStateOf(prefs.getString(KEY_TOKEN, "") ?: "")
@@ -303,7 +353,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      * `index` 只是显示顺序。strength 跨模型稳定，用户存的值换模型后仍然有效。
      *
      * ★ **首次进入的默认 = 高（8）**：用户口径「首次进入 = 思考开 + 高」。
-     *   厂商默认也是 high（DeepSeek 官方 effort 默认 high；网关服务端默认档同样是 high）
+     *   厂商默认也是 high（DeepSeek 官方 effort 默认 high；自备后端的默认档同样是 high）
      *   ⇒ 这里**显式落一个值**，不靠任何一方的默认值 ——
      *   「界面显示高」和「实际发出去的就是高」必须是同一件事。
      *   （老设备上存过 0 = 「服务端默认档」的保持原样，不迁移。）
@@ -311,20 +361,84 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      * ★ **一个值就够，「开启」不必单独存**：这个编码同时表达了「开不开」和「哪一档」——
      *   `1` = 关闭思考（[ReasoningStrength.OFF]）、`2`=low、`4`=medium、`8`=high、`16`=max、`32`=xhigh。
      *   两条投送路径**都认这一个值**：直连 ⇒ 翻成 `thinking.type` + `reasoning_effort`；
-     *   投我方网关 ⇒ 翻成 `reasoning_strength`（网关按「≤ 上限的最高可用档」取档）。
+     *   发给自备后端 ⇒ 翻成 `reasoning_strength`（由你的后端按「≤ 上限的最高可用档」取档）。
      *   ⇒ 宿主只管存这一个值，**两套线格式由 SDK 那一个方法各自翻译**，宿主不必分两套逻辑。
      */
-    var reasoningStrength by mutableStateOf(
-        prefs.getInt(KEY_STRENGTH, ReasoningStrength.HIGH.value).takeIf { it > 0 },
-    )
+    /**
+     * ★ **初值 ＋ 存量迁移**（v1.1.26：从「开关 ＋ 档位」两维收成**单值**）。
+     *
+     * 返回 `(当前值, 上次选过的非关档位)`：
+     * - 老版本本地存过 `thinking_enabled`（缺省 **true**）：
+     *   - 存过 **false** ⇒ 老行为是「思考关」（发给 SDK 的编码**恒为 `1`**）⇒ 现在落 `1`；
+     *   - 缺省 / true ⇒ 强度值原样用；
+     * - 迁移完就把那个键**删掉** ⇒ 本地从此**只存一个编码**；
+     * - 「上次选过的非关档位」优先取存下来的强度值（没有或是 `1` 就用 `8`）——
+     *   它只存在**内存**里，供「开」按钮恢复（**不落盘** ⇒ 仍然只存一个编码）。
+     */
+    private fun seedStrength(): Pair<Int?, Int> {
+        val stored = prefs.getInt(KEY_STRENGTH, ReasoningStrength.HIGH.value).takeIf { it > 0 }
+        val legacyOff = prefs.contains(KEY_THINKING_ENABLED) && !prefs.getBoolean(KEY_THINKING_ENABLED, true)
+        if (prefs.contains(KEY_THINKING_ENABLED)) {
+            prefs.edit().remove(KEY_THINKING_ENABLED).apply()
+        }
+        val value = if (legacyOff) ReasoningStrength.OFF.value else stored
+        val lastOn = stored?.takeIf { it != ReasoningStrength.OFF.value } ?: ReasoningStrength.HIGH.value
+        return value to lastOn
+    }
+
+    private val strengthSeed = seedStrength()
+
+    /** ★ **内存态**：上次选过的「非关」档位（供「开」按钮恢复；**不落盘**）。 */
+    private var lastOnStrength by mutableStateOf(strengthSeed.second)
+
+    /**
+     * ★ **本地只存一个编码**（v1.1.26 收口；与 SDK 文档口径一致）。
+     *
+     * | 存的值 | 含义 | 发给 SDK |
+     * |---|---|---|
+     * | `1` | 关思考（[ReasoningStrength.OFF]） | `1` ⇒ 官方翻成 `thinking.type=disabled`；后端翻成 `reasoning_strength=1` |
+     * | `2` / `4` / `8` / `16` / `32` | low / medium / high / max / xhigh | 原样 |
+     * | `0`（没设） | 不指定 | `null` ⇒ **一个思考字段都不发** ⇒ 对端默认「开 + 高」 |
+     *
+     * ★ **没有第二维**：界面上的「思考：开 / 关」是**同一个数的快捷方式**（见 [selectThinkingEnabled]）。
+     */
+    var reasoningStrength by mutableStateOf(strengthSeed.first)
         private set
 
     /** 选一档（传 strength）。传 null = 用服务端默认。 */
     fun selectReasoningStrength(strength: Int?) {
         reasoningStrength = strength
         prefs.edit().putInt(KEY_STRENGTH, strength ?: 0).apply()
+        // ★ 「开」按钮要能恢复**上次选过的档** ⇒ 只记在**内存**里（**不落盘** ⇒ 本地仍然只存一个编码）
+        if (strength != null && strength != ReasoningStrength.OFF.value) lastOnStrength = strength
         log("EFFORT", "思考强度设为 ${strength ?: "(服务端默认)"}")
     }
+
+    /**
+     * ★ 「思考：开 / 关」是**同一个数的快捷方式**（**不是第二个字段、不是第二维**）。
+     *
+     * ## 为什么这么收
+     * SDK 文档的口径是「**本地只存一个编码**」⇒ 界面再存一个 `thinking_enabled` 布尔就与文档对不上；
+     * 而且开关与档位能组合出「关 ＋ high」这种**自相矛盾**的组合。
+     *
+     * ## 行为
+     * - **关** ⇒ 落 `1`（OFF）：直连翻成 `thinking.type=disabled`，自备后端翻成 `reasoning_strength=1`；
+     * - **开** ⇒ 落**上次选过的档位**（内存里记着；没有就用 `8` = 开 + 高，与首次进入一致）。
+     *
+     * ⇒ 本地**始终只有一个编码**；而「开/关」这个入口**仍然保留** ——
+     * 用官方 API 时没有服务端档位清单可拉，它就是**唯一能关思考**的地方。
+     */
+    fun selectThinkingEnabled(enabled: Boolean) {
+        if (enabled) {
+            selectReasoningStrength(lastOnStrength)
+        } else {
+            selectReasoningStrength(ReasoningStrength.OFF.value)
+        }
+    }
+
+    /** 界面上「思考开关」的样子（**由那一个数推出来**，不另存）。 */
+    val thinkingOn: Boolean
+        get() = reasoningStrength != ReasoningStrength.OFF.value
 
     /**
      * 拉服务端档位清单。
@@ -334,7 +448,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      */
     fun loadEffortCatalog() {
         if (gatewayUrl.isBlank()) {
-            effortCatalogError = "先填网关地址"
+            effortCatalogError = "先填后端地址"
             return
         }
         DemoRuntime.startOnce("efforts") {
@@ -427,7 +541,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
     private val contextInspector = ai.agentkernel.context.ContextInspector()
 
     /**
-     * 会话标识（发给网关的 `session_id`）。
+     * 会话标识（发给后端的 `session_id`）。
      *
      * 一个会话一个 id，**开新对话就换一个** ——
      * 服务端靠它记住「这个会话上一次请求长什么样」，从而独立复核前缀有没有被改；
@@ -441,7 +555,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      * 本轮每个 assistant 回合的 `finish_reason`。
      *
      * 记它是因为**「length」= 被 max_tokens 截断 = 答案不完整**，
-     * 而网关原先回传的是写死的 `stop` —— 半句答案会被当成完整交付。
+     * 而后端原先回传的是写死的 `stop` —— 半句答案会被当成完整交付。
      */
     private val turnFinishReasons = mutableListOf<String>()
 
@@ -967,7 +1081,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
             //    普通 App 没有读权限，File.list() 必然返回 null（真机上出现过：清单探出 0 条）。
             //    （复核用的是同一套 stat 机制，但代码是独立写的；
             //     真正独立的证据是下面**实跑**那几条 —— 「存在」不等于「能跑」。）
-            // 客户端 system 段上限（与网关的 client_system_max_chars 默认值一致；那边是可调参数）。
+            // 客户端 system 段上限（与后端的 client_system_max_chars 默认值一致；那边是可调参数）。
             val segLimit = AndroidAgentSdk.DEFAULT_SYSTEM_BUDGET_LIMIT_CHARS
             val reallyThere = setOf("/system/bin", "/system/xbin")
             val missing = claimed.filterNot { cmd ->
@@ -1003,7 +1117,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                     // 提示词有多长 —— **两条预算都得报**，只报一条会误导人：
                     //   ① 提示词本体 < 2000（SDK 自己的保险线，`DevicePromptBudgetTest` 硬断言）
                     //   ② system 段总长上限（服务端参数 client_system_max_chars，默认 6000，可调）
-                    // 网关会把客户端 system 段**截到上限**，超了就砍尾巴
+                    // 后端会把客户端 system 段**截到上限**，超了就砍尾巴
                     //（长期记忆 digest / 会话摘要 / 工作区告警正好排在最后）。这个数字得看得见。
                     val promptLen = systemPrompt.length
                     val fullLen = AndroidAgentSdk.buildSystemPrompt(
@@ -1111,7 +1225,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
     /** 让模型驱动设备能力 —— 走 SDK 内核的完整闭环。 */
     suspend fun sendToModel(userText: String) {
         if (gatewayUrl.isBlank()) {
-            chat += ChatLine.System("先在「对话」页填好网关地址和 token")
+            chat += ChatLine.System("先在「对话」页填好后端地址和 token")
             return
         }
         chatBusy = true
@@ -1135,8 +1249,9 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 // ★ 思考强度：传**强度编码**（2 的幂，跨模型稳定）—— **一个值，两条路径共用**。
                 //   null = 不带这个字段，由服务端用它的默认档位。
                 //   它是「上限」：服务端取「强度 ≤ 给的值」里该模型能达到的最高档（只向下）。
-                //   `1` = 关闭思考（两侧都认：直连翻成 thinking.type=disabled，网关翻成 reasoning_strength=1）。
-                //   其它值 ⇒ 直连翻成 thinking{enabled} + reasoning_effort，网关翻成 reasoning_strength。
+                //   `1` = 关闭思考（两侧都认：官方翻成 thinking.type=disabled，自备后端翻成 reasoning_strength=1）。
+                //   其它值 ⇒ 官方翻成 thinking{enabled} + reasoning_effort，自备后端翻成 reasoning_strength。
+                // ★ 本地**只存一个编码**（开关与档位是同一个数的两种入口）⇒ 发给 SDK 的也只有一个值。
                 reasoningStrength = reasoningStrength,
                 // ★ 工作区守卫：超配额时自动把告警注入这一轮，让 agent 自己清理。
                 workspaceGuard = workspace.guard,
@@ -1152,14 +1267,14 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                         is KernelEvent.Assistant -> {
                             val msg = event.message
                             // 结束原因必须打出来：'length' = 被 max_tokens 截断 → 答案不完整。
-                            // 网关原先把它写死成 'stop'，于是半句答案被当完整交付（谎报成功）。
+                            // 后端原先把它写死成 'stop'，于是半句答案被当完整交付（谎报成功）。
                             log(
                                 "CHAT",
                                 "回合: finish_reason=${msg.finishReason ?: "(null)"} | " +
                                     "tool_calls=${msg.toolCalls.size} | 正文长度=${msg.content?.length ?: 0}",
                             )
                             msg.finishReason?.let { turnFinishReasons += it }
-                            // 服务端视角的前缀报告：网关那一侧的头部（平台提示词/技能/工具定义）
+                            // 服务端视角的前缀报告：后端那一侧的头部（平台提示词/技能/工具定义）
                             // 本地一条都看不见，只有它能说清「缓存为什么没全中」。
                             msg.prefix?.let { p ->
                                 log(
@@ -1195,7 +1310,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                     }
                 },
             )
-            // system 段预算体检：超了网关会**悄悄截断**，排在最后的记忆/摘要/告警就丢了 ——
+            // system 段预算体检：超了后端会**悄悄截断**，排在最后的记忆/摘要/告警就丢了 ——
             // 模型看不到，却没人知道。这种静默故障必须显式报出来。
             //
             // ★ SDK 现在会**主动协调**：能砍的只有长期记忆 digest（它能用 agent-memory search 取回），
@@ -1216,10 +1331,10 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 } else if (b.over) {
                     log(
                         "CTX",
-                        "⚠️ system 段超限 $detail 合计=${b.totalChars} > ${b.limitChars}（网关会截断，尾部到不了模型）",
+                        "⚠️ system 段超限 $detail 合计=${b.totalChars} > ${b.limitChars}（后端会截断，尾部到不了模型）",
                     )
                     chat += ChatLine.System(
-                        "system 段超限（${b.totalChars}/${b.limitChars} 字符）—— 网关会截断，尾部到不了模型。",
+                        "system 段超限（${b.totalChars}/${b.limitChars} 字符）—— 后端会截断，尾部到不了模型。",
                     )
                 } else {
                     log(
@@ -1760,7 +1875,13 @@ class DemoState(app: Application) : AndroidViewModel(app) {
         item(
             "cipher-impl",
             registered && decryptable,
-            "registered=$registered · decryptable=$decryptable · 实现类=$resolved",
+            "registered=$registered · decryptable=$decryptable · 实现类=$resolved" +
+                // ★ 审计标注：凭据**存储模式**必须出现在自检报告里（明文模式不能悄悄开着）。
+                " · ★ 存储模式=" + if (CredentialCipherLoader.isPlaintextMode()) {
+                    "明文（未加密 · 仅开发调试）"
+                } else {
+                    "加密"
+                },
         )
 
         // ---- 第二次跑 = 只读（验「重启后仍读得出」）----
@@ -1801,10 +1922,17 @@ class DemoState(app: Application) : AndroidViewModel(app) {
             }
         }
         scan(context.filesDir)
+        // ★ 明文模式下磁盘上**本来就有**明文 ⇒ 这一项不作不合格，但要**说清原因**（不能默默变红）。
+        val plaintextOn = CredentialCipherLoader.isPlaintextMode()
         item(
             "cred-no-plaintext",
-            hits == 0,
-            "命中 $hits 处" + (if (firstHit.isEmpty()) "" else "（首个：$firstHit）"),
+            hits == 0 || plaintextOn,
+            "命中 $hits 处" + (if (firstHit.isEmpty()) "" else "（首个：$firstHit）") +
+                if (plaintextOn) {
+                    " · ★ 明文模式：磁盘上有明文是**预期行为**（拿到凭据文件就能还原 key）"
+                } else {
+                    ""
+                },
         )
 
         // ---- ④ 读回来（往返一致；**不打印明文**）----
@@ -1846,7 +1974,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      * 只跑一轮，看到的永远是「没命中」——说明不了前缀稳不稳。
      *
      * 走的是**和对话页发送按钮完全同一个函数** [sendToModel]，
-     * 所以验的是真闭环（真网关 + 真模型 + 真历史累积）。
+     * 所以验的是真闭环（真后端 + 真模型 + 真历史累积）。
      *
      * ```
      * adb shell am start -n com.agentkernel.demo/.MainActivity \
@@ -1919,7 +2047,7 @@ class DemoState(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 运行时注入网关配置（命令行 / 自动化用）。
+     * 运行时注入后端配置（命令行 / 自动化用）。
      *
      * 仍然是**运行时**的：token 不进 APK、不进代码、不进日志。
      *
@@ -1957,6 +2085,23 @@ class DemoState(app: Application) : AndroidViewModel(app) {
 
         /** 思考强度的**强度编码**（不是 key / index —— 那两个换模型就失效）。 */
         const val KEY_STRENGTH = "reasoning_strength"
+
+        /**
+         * ★ **已废弃**（v1.1.26 收成单值时留下的**迁移源**）：老版本的思考开关。
+         *
+         * 现在只用来做**一次性存量迁移**（见 `DemoState.seedStrength`）：
+         * 老版本存过 `false` ⇒ 旧行为是「思考关」⇒ 迁移成编码 `1`；
+         * 迁移完这个键就被**删掉** ⇒ 本地从此**只存一个编码**（[KEY_STRENGTH]）。
+         */
+        const val KEY_THINKING_ENABLED = "thinking_enabled"
+
+        /**
+         * ★ **明文模式**开关（v1.1.26）：凭据**不加密**落盘。
+         *
+         * 只在**可调试构建**里可能为 true（见 `DemoState.plaintextModeAvailable`）；
+         * 改完要**重启应用**才生效（注册是进程级的）。
+         */
+        const val KEY_PLAINTEXT_MODE = "plaintext_mode"
 
         /** `agent-text` 的用法行（与 SDK 能力给的 usage 一字不差）。 */
         const val AGENT_TEXT_USAGE = "agent-text <read <相对路径>|patch <相对路径> <补丁规格>>"

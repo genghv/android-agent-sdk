@@ -94,7 +94,7 @@ afterEvaluate {
  *   gradlew :sdk-android:realLlmCheck
  *
  * 退出码 0 = 真链路跑通：模型真的下发了命令、命令真的执行了、结果真的回喂给了模型。
- * 这一档验的是「和真网关的线格式对不对得上」—— 本地 mock 照单全收，验不出这个。
+ * 这一档验的是「和真后端的线格式对不对得上」—— 本地 mock 照单全收，验不出这个。
  */
 tasks.register<JavaExec>("realLlmCheck") {
     group = "verification"

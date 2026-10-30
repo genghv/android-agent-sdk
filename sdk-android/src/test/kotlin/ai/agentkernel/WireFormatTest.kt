@@ -15,15 +15,15 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * 线格式契约测试 —— 锁的是「真实网关认的形状」，不是「想象的形状」。
+ * 线格式契约测试 —— 锁的是「真实后端认的形状」，不是「想象的形状」。
  *
  * 基准是 DeepSeek 官方线格式那份**拿 live 流校验过**的实现
  * （harness 仓库 `packages/llm/llm-deepseek/src/types.ts` 与同目录 `serialize.ts`，
  * 标注 "cross-checked against live streams"）。
  *
  * 这几条之所以要有测试：它们**在本地 mock 上看不出问题**——
- * mock 会照单全收。而对着真网关时，每一条都是当场 400：
- * - assistant 的 `content` 必须是字符串，给 null 有些网关直接拒；
+ * mock 会照单全收。而对着真后端时，每一条都是当场 400：
+ * - assistant 的 `content` 必须是字符串，给 null 有些后端直接拒；
  *   「只有思考、既无正文又无 tool_calls」的回合，live API 会 400
  *   （`content or tool_calls must be set`），而消息在会话日志里，一坏就带崩后面每一轮。
  * - **带 tools 的请求里，历史中每一条 assistant 的 `reasoning_content` 都要回传**
@@ -115,7 +115,7 @@ class WireFormatTest {
 
     @Test
     fun `服务端不理会 stream 时仍能解析整块 JSON`() = runBlocking {
-        // 有些网关忽略 stream:true，仍回一整块 JSON。
+        // 有些后端忽略 stream:true，仍回一整块 JSON。
         // 那不能当成「一条空流」—— 那样会静默丢掉模型说的话。
         val server = MockLlmServer { _, _ ->
             MockLlmServer.Reply(

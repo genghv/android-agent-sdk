@@ -43,6 +43,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -105,7 +106,7 @@ class MainActivity : ComponentActivity() {
         //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_cred true
         //   adb logcat -d -s AgentSdkDemo | Select-String 'CRED\|'
         val autorunCred = intent?.getBooleanExtra("autorun_cred", false) ?: false
-        // 网关配置也能从命令行注入（**运行时**的，token 不进 APK）：
+        // 后端配置也能从命令行注入（**运行时**的，token 不进 APK）：
         //   --es gateway_url ... --es gateway_token ... --es gateway_model ...
         // 思考强度用**强度编码**注入（2 的幂：1=关闭思考 2=low 4=medium 8=high 16=max）：
         //   --ei reasoning_strength 8
@@ -494,6 +495,39 @@ fun SelfCheckScreen(state: DemoState, padding: PaddingValues) {
             Text(if (state.selfCheckRunning) "正在自检…" else "一键自检（自动监测）")
         }
 
+        // ---- 凭据存储模式（**明文模式**：显式 opt-in，且**只在可调试构建里暴露**）----
+        // ★ 宿主三件套（见《接入指南》§11.14.11）：
+        //   ① **界面红字提示** ② **审计标注**（自检报告里带存储模式）③ **只在 debug 构建暴露**。
+        //   正式构建里 `plaintextModeAvailable` = false ⇒ 这整块**根本不渲染**（不是藏起来）。
+        if (state.plaintextModeAvailable) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(
+                            checked = state.plaintextMode,
+                            onCheckedChange = { state.applyPlaintextMode(it) },
+                        )
+                        Text("明文模式（仅开发调试）", fontWeight = FontWeight.Bold)
+                    }
+                    Text(
+                        if (state.plaintextMode) {
+                            "★ 当前凭据**未加密**保存在本机 —— 拿到凭据文件就能还原 key。" +
+                                "只适合本地开发调试；改完要**重启应用**才生效。"
+                        } else {
+                            "默认关闭：凭据由闭源 Keystore 实现加密落盘。" +
+                                "打开后不加密、不绑 AAD、不验完整性 —— 只在本地开发调试时用。"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (state.plaintextMode) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
+        }
+
         val pass = state.checks.count { it.verdict == Verdict.PASS }
         val warn = state.checks.count { it.verdict == Verdict.WARN }
         val fail = state.checks.count { it.verdict == Verdict.FAIL }
@@ -602,8 +636,8 @@ fun ChatScreen(state: DemoState, padding: PaddingValues) {
         OutlinedTextField(
             value = state.gatewayUrl,
             onValueChange = { state.gatewayUrl = it },
-            label = { Text("网关地址（OpenAI 兼容）") },
-            placeholder = { Text("https://your-gateway/v1") },
+            label = { Text("后端地址（OpenAI 兼容）") },
+            placeholder = { Text("https://your-backend/v1") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -646,6 +680,27 @@ fun ChatScreen(state: DemoState, padding: PaddingValues) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+        // ---- 思考开关（**同一个数的快捷方式**：关 ⇒ 1；开 ⇒ 恢复上次选过的档）----
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilterChip(
+                selected = state.thinkingOn,
+                onClick = { state.selectThinkingEnabled(!state.thinkingOn) },
+                label = { Text(if (state.thinkingOn) "思考：开" else "思考：关") },
+            )
+            Text(
+                when {
+                    !state.thinkingOn -> "关 ⇒ 发编码 1（思考关，直连翻成 thinking.type=disabled）"
+                    state.reasoningStrength == null ->
+                        "开 ＋ 未选档 ⇒ 不发思考字段（对端默认 = 开 + 高）"
+                    else -> "开 ＋ 档位 ${state.reasoningStrength} ⇒ 发编码 ${state.reasoningStrength}"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         if (catalog != null) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

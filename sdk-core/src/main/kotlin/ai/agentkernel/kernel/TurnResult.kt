@@ -25,7 +25,7 @@ enum class TurnStop {
  * @param finalText 最终 assistant 文本（可能为 null，例如只调工具不说话）。
  * @param usage 本轮**全部**请求的 token 用量之和（含缓存命中数）。
  * @param context 最近一次请求的上下文体检报告（前缀有没有被动过）。
- * @param prefix **服务端视角**的前缀体检报告（网关回的 `prefix`）。
+ * @param prefix **服务端视角**的前缀体检报告（后端回的 `prefix`）。
  *   与 [context] 互补：[context] 查本地这段历史，[prefix] 查服务端拼的头部
  *   （平台提示词/技能/工具定义）—— 那一段 App 本地看不见。
  * @param added 本轮**新增**的消息（assistant + 工具回填）。

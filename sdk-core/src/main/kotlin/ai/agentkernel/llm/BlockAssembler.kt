@@ -76,7 +76,7 @@ class BlockAssembler {
     /**
      * 服务端的前缀体检报告。
      *
-     * 与 [usage] 在同一帧（网关把它们一起发），所以取最后一次见到的。
+     * 与 [usage] 在同一帧（后端把它们一起发），所以取最后一次见到的。
      */
     fun prefix(): PrefixReport? = prefix
 
@@ -111,7 +111,7 @@ data class StreamDelta(
     /**
      * 服务端的前缀体检报告（挂在**帧的根上**，与 [usage] 同一帧）。
      *
-     * 不是 OpenAI 标准字段 —— 只有支持它的网关会回。没有就是没有，不猜。
+     * 不是 OpenAI 标准字段 —— 只有支持它的后端会回。没有就是没有，不猜。
      */
     val prefix: PrefixReport? = null,
 )

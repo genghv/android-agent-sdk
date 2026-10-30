@@ -1,14 +1,14 @@
 package ai.agentkernel.llm.openai
 
 /**
- * LLM 网关的鉴权方式。
+ * LLM 后端的鉴权方式。
  *
  * ## 为什么要抽出来
  *
  * 官方 OpenAI 是 `Authorization: Bearer <secret key>`，
  * 但**自建服务不一定这样**：可能用自己的头名（`X-Token` / `X-Api-Key`）、
- * 可能用别的方案（`token` 查询参数、网关签名……）。
- * 把鉴权写死在客户端里，等换网关就得改 SDK。
+ * 可能用别的方案（`token` 查询参数、后端签名……）。
+ * 把鉴权写死在客户端里，等换后端就得改 SDK。
  *
  * 抽出来之后，**线格式一个字都不用改** ——
  * 请求体、响应解析、流式聚合全是 OpenAI 那套，
@@ -31,7 +31,7 @@ fun interface LlmAuth {
     fun headers(): Map<String, String>
 
     companion object {
-        /** `Authorization: Bearer <token>` —— 绝大多数兼容网关都吃这个。 */
+        /** `Authorization: Bearer <token>` —— 绝大多数兼容服务都吃这个。 */
         fun bearer(token: String): LlmAuth = LlmAuth { mapOf("Authorization" to "Bearer $token") }
 
         /**
@@ -49,7 +49,7 @@ fun interface LlmAuth {
         /** 自定义头名 + 值，例如 `X-Token`。 */
         fun header(name: String, value: String): LlmAuth = LlmAuth { mapOf(name to value) }
 
-        /** 不带鉴权（内网免鉴权的网关、或用查询参数带 token 的场景）。 */
+        /** 不带鉴权（内网免鉴权的服务、或用查询参数带 token 的场景）。 */
         fun none(): LlmAuth = LlmAuth { emptyMap() }
     }
 }

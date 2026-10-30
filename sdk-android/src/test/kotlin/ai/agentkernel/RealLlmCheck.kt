@@ -21,9 +21,9 @@ import java.io.File
 import kotlin.system.exitProcess
 
 /**
- * 用**真实 LLM API** 跑一轮，把内核和真网关之间最后一段坐实。
+ * 用**真实 LLM API** 跑一轮，把内核和真后端之间最后一段坐实。
  *
- * 本地 mock 验的是「内核自己的逻辑」；这一档验的是「**和真网关的线格式对不对得上**」——
+ * 本地 mock 验的是「内核自己的逻辑」；这一档验的是「**和真后端的线格式对不对得上**」——
  * 而后者才是真机上第一个会炸的地方（content 给 null、tool_calls 不回传 reasoning_content、
  * 非流式被拒……）。这些坑在 mock 上全都看不出来，因为 mock 照单全收。
  *
@@ -40,7 +40,7 @@ import kotlin.system.exitProcess
  * set LLM_REASONING_STRENGTH=8      # 强度编码；不设 = 不带这个字段
  * set LLM_REASONING_WIRE=deepseek   # gateway（默认）/ deepseek / openai
  * ```
- * ⚠️ **直连厂商官方时 `wire` 一定要选对**：`reasoning_strength` 是**网关私有字段**，
+ * ⚠️ **直连厂商官方时 `wire` 一定要选对**：`reasoning_strength` 是**扩展字段**（由自备后端自行解释），
  * 发给厂商只会被忽略或 400 ⇒ **静默不生效**（用户以为设了，其实没变）。
  * 这一档会把**实际发出去的请求体**里跟思考相关的字段打出来（**不打印任何凭据**）。
  *
@@ -114,7 +114,7 @@ fun main(): Unit = runBlocking {
 
     // 结束原因：'length' = 被 max_tokens 截断 → **答案不完整**。
     // 这一条必须查：思考链会把 max_tokens 预算吃光，正文只剩几个 token，
-    // 而网关如果还回报 'stop'，那就是谎报成功（客户端以为答案完整）。
+    // 而后端如果还回报 'stop'，那就是谎报成功（客户端以为答案完整）。
     // 实测踩过：思考链用掉 4090/4096，模型只答了「结果：」就没了。
     val finishReasons = result.messages.filterIsInstance<AssistantMessage>()
         .mapNotNull { it.finishReason }
@@ -139,7 +139,7 @@ fun main(): Unit = runBlocking {
         println("reasoning_strength = ${sent["reasoning_strength"]?.jsonPrimitive?.content ?: "(none)"}")
         println("reasoning_effort   = ${sent["reasoning_effort"]?.jsonPrimitive?.content ?: "(none)"}")
         println("thinking.type      = ${thinkingType ?: "(none)"}")
-        // 线格式一致性：厂商形状下**绝不能**出现网关私有字段。
+        // 线格式一致性：厂商形状下**绝不能**出现扩展字段 `reasoning_strength`。
         val wireOk = when (wire) {
             ReasoningWire.GATEWAY -> true
             ReasoningWire.DEEPSEEK -> keys.contains("thinking") && !keys.contains("reasoning_strength")

@@ -80,7 +80,7 @@ class AgentSystemPromptTest {
     }
 
     @Test
-    fun `核心模式要装得进网关的 2000 字符预算`() {
+    fun `核心模式要装得进后端的 2000 字符预算`() {
         // 用真机上那种长度的路径测，别用短路径骗自己
         val realLayout = PrefixLayout("/data/user/0/com.agentkernel.demo/files")
         val inv = inventoryOf("ls", "cp", "mv", "rm", "mkdir", "find", "du", "df", "pwd", "touch")
@@ -92,7 +92,7 @@ class AgentSystemPromptTest {
         )
         assertTrue(
             core.length < 2000,
-            "核心模式必须装进网关 system 段（实测有网关硬截断到 2000），现在 ${core.length}：\n$core",
+            "核心模式必须装进后端 system 段（实测有后端硬截断到 2000），现在 ${core.length}：\n$core",
         )
     }
 
@@ -169,7 +169,7 @@ class AgentSystemPromptTest {
         assertFalse(text.contains("实测存在"), "兜底时不能说『实测』")
     }
 
-    // ---- 瘦身（为有 system 段预算的网关准备） ----
+    // ---- 瘦身（为有 system 段预算的后端准备） ----
 
     private fun inventoryOf(vararg names: String): ShellCommandInventory.Result =
         ShellCommandInventory.Result(

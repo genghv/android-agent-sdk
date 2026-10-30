@@ -63,7 +63,7 @@ class UsageReportingTest {
     }
 
     @Test
-    fun `非流式：只给 cached_tokens 的形状也要认（OpenAI 兼容网关的另一种写法）`() = runBlocking {
+    fun `非流式：只给 cached_tokens 的形状也要认（OpenAI 兼容服务的另一种写法）`() = runBlocking {
         val transport = FakeTransport(
             """
             {"choices":[{"index":0,"message":{"role":"assistant","content":"在"},"finish_reason":"stop"}],
@@ -82,7 +82,7 @@ class UsageReportingTest {
     @Test
     fun `非流式：prompt_tokens 报的是未命中口径时，要归一成总量`() = runBlocking {
         // 内核的 disjoint 约定：inputTokens 是**未缓存**的输入，命中部分单独报。
-        // 有些网关就这么报 —— 直接拿来算命中率会算错。
+        // 有些后端就这么报 —— 直接拿来算命中率会算错。
         val transport = FakeTransport(
             """
             {"choices":[{"index":0,"message":{"role":"assistant","content":"在"},"finish_reason":"stop"}],

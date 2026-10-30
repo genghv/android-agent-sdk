@@ -108,7 +108,7 @@ class ContextMemoryTest {
         val mem = memory(llm, ContextPolicy(maxContextChars = 500, keepRecentChars = 100), { now })
 
         // 主请求的稳定前缀里带着上一轮的摘要（它本来就是一个 system 段）。
-        val priorSummary = SystemMessage("## 之前的对话摘要（压缩后的历史）\n用户在配网关")
+        val priorSummary = SystemMessage("## 之前的对话摘要（压缩后的历史）\n用户在配后端")
         mem.prepare(bigHistory(20), prefixChars = 0, replayPrefix = listOf(priorSummary))
         mem.prepare(bigHistory(20), prefixChars = 0, replayPrefix = listOf(priorSummary))
 
@@ -117,7 +117,7 @@ class ContextMemoryTest {
         // 上一轮的摘要**逐字**出现在重放的前缀里 —— 否则第一次压掉的内容就永久丢了
         assertEquals(listOf<ChatMessage>(priorSummary), second.messages.take(1))
         assertTrue(
-            second.messages.none { it is UserMessage && it.content.contains("用户在配网关") },
+            second.messages.none { it is UserMessage && it.content.contains("用户在配后端") },
             "上一轮摘要不该再被塞进 user 消息（会变成同一段内容出现两遍）：" +
                 (second.messages.last() as UserMessage).content,
         )
@@ -133,7 +133,7 @@ class ContextMemoryTest {
 
         val replayPrefix = listOf<ChatMessage>(
             SystemMessage("你是设备上的助手"),
-            SystemMessage("## 你之前和用户聊过什么（长期记忆）\n- 配网关"),
+            SystemMessage("## 你之前和用户聊过什么（长期记忆）\n- 配后端"),
         )
         val tools = listOf(
             buildJsonObject {
@@ -167,7 +167,7 @@ class ContextMemoryTest {
         // ③ tools 与主请求**完全一致**（不一致 = 压缩这次调用不吃缓存）
         assertEquals(tools, request.tools)
 
-        // ④ 网关据此识别压缩请求
+        // ④ 后端据此识别压缩请求
         assertEquals(JsonPrimitive(true), request.extra["compact"])
     }
 
@@ -284,7 +284,7 @@ class ContextMemoryTest {
 
     @Test
     fun `归档后的记忆会进摘要块`() = runBlocking {
-        val llm = FakeLlm(reply = "事实：用户在配网关")
+        val llm = FakeLlm(reply = "事实：用户在配后端")
         var now = 1_000_000L
         val mem = memory(llm, ContextPolicy(idleArchiveMillis = 60_000), { now })
 
@@ -294,7 +294,7 @@ class ContextMemoryTest {
 
         val digest = mem.digest()
         assertNotNull(digest, "有记忆就该有摘要块")
-        assertTrue(digest.contains("配网关"), "摘要块要带上记忆内容：$digest")
+        assertTrue(digest.contains("配后端"), "摘要块要带上记忆内容：$digest")
     }
 
     @Test

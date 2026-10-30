@@ -31,7 +31,7 @@ id 的命名规则），一变你写死的命令就全废了；而且手改文�
 ```bash
 agent-memory list                       # 有哪些记忆（id / 时间 / 标题 / 字数）
 agent-memory get 20261028-1432          # 读某一条正文
-agent-memory search 网关                # 按关键词找（标题或正文命中，不区分大小写）
+agent-memory search 后端                # 按关键词找（标题或正文命中，不区分大小写）
 agent-memory add "用户确认：灌溉阈值按 80"   # 记一条新的
 agent-memory edit 20261028-1432 "改成：阈值按 60"  # 整条替换
 agent-memory patch 20261028-1432 "replace-lines 2 2 阈值按 60"  # ★ 只改某几行
@@ -87,7 +87,7 @@ agent-memory patch 20261028-1432 "replace-block|阈值按 80|阈值按 60"
 ```bash
 cat $AGENT_ROOT/var/memory/index.json              # 有哪些记忆
 cat $AGENT_ROOT/var/memory/entries/20261028-1432.md # 读某一条正文
-grep -l '网关' $AGENT_ROOT/var/memory/entries/*.md  # 按关键词找
+grep -l '后端' $AGENT_ROOT/var/memory/entries/*.md  # 按关键词找
 ```
 
 `$AGENT_ROOT` 就是你的私有根（系统提示词里写了具体路径）。

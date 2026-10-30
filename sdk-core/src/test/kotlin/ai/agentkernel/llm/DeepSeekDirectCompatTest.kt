@@ -27,8 +27,8 @@ import kotlin.test.assertTrue
  *    （`POST /chat/completions`，`messages` 里带 `role:"system"`）；
  * 2. **接自建服务**：同一套线格式，服务端做映射（模型固定、提示词来自后端、限频、缓存可观测）。
  *
- * SDK 这几年一直在加「网关侧」的能力（会话标识、服务端前缀报告……）。
- * **每加一个网关字段，都可能悄悄改掉直连 DeepSeek 时发出去的请求体** ——
+ * SDK 这几年一直在加「后端侧」的能力（会话标识、服务端前缀报告……）。
+ * **每加一个后端字段，都可能悄悄改掉直连 DeepSeek 时发出去的请求体** ——
  * 那是「发布版适配 DeepSeek API」这条承诺的地基。
  *
  * 所以这里**把请求体的键集合钉死**：以后谁往 body 里塞了新字段，这条测试就红。
@@ -62,7 +62,7 @@ class DeepSeekDirectCompatTest {
     )
 
     @Test
-    fun `直连 DeepSeek：请求体的键集合不能被网关字段污染`() = runBlocking {
+    fun `直连 DeepSeek：请求体的键集合不能被后端字段污染`() = runBlocking {
         val transport = FakeTransport(deepSeekResponse)
         val client = ChatCompletionsClient(
             "https://api.deepseek.com/v1",

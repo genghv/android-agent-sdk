@@ -9,10 +9,10 @@ import kotlinx.serialization.json.put
  *
  * ## 为什么必须有这个开关
  *
- * 我们的主契约是**强度编码**（2 的幂，`reasoning_strength`），
- * 但那是**我们网关的私有字段**：网关按该模型的目录，把编码翻译成厂商档位。
+ * 宿主本地保存的是**强度编码**（2 的幂，`reasoning_strength`），
+ * 但那是**扩展字段**：由自备后端自行解释（不是厂商标准字段）。
  *
- * **直连厂商官方时，网关那一层根本不存在** ⇒ 编码没人翻译 ⇒
+ * **直连厂商官方时，这一层根本不存在** ⇒ 编码没人翻译 ⇒
  * 厂商要么忽略这个未知字段、要么 400。
  * 而多数厂商**忽略**未知字段 ⇒ **不报错、用户拖了滑块以为设了、其实没变** ——
  * 这比报错更糟（报错至少有人知道）。
@@ -23,7 +23,7 @@ import kotlinx.serialization.json.put
  *
  * | 形状 | 发出去的字段 | 适用 |
  * |---|---|---|
- * | [GATEWAY] | `reasoning_strength` = 整数编码 | 走我们网关（**默认**，现有调用方零影响） |
+ * | [GATEWAY] | `reasoning_strength` = 整数编码 | 用自备后端（**默认**，现有调用方零影响） |
  * | [DEEPSEEK] | `thinking` = `{"type":"enabled｜"disabled"}` **＋** `reasoning_effort` = `"low｜high｜max"` | DeepSeek 官方（**开关与强度是两个独立参数**） |
  * | [OPENAI] | `reasoning_effort` = `"minimal"｜"low"｜"medium"｜"high"` | OpenAI 系（**字符串**档位） |
  *
@@ -31,13 +31,13 @@ import kotlinx.serialization.json.put
  *
  * 宿主本地**只存一个编码**（1 关 / 2 low / 4 medium / 8 high / 16 max / 32 xhigh），
  * 由**本文件这一个方法**按目标翻译成对应线格式 ⇒
- * 「发 8」在网关侧 = `reasoning_strength=8`，在直连 DeepSeek 侧 = `thinking` ＋ `reasoning_effort=high`
+ * 「发 8」在后端侧 = `reasoning_strength=8`，在直连 DeepSeek 侧 = `thinking` ＋ `reasoning_effort=high`
  * —— **同一个配置、两种落法，宿主不用管**。
  *
  * ## 强度编码 → 厂商档位（直连时没有目录，只能用内置表）
  *
  * 编码是**上限**（强度 ≤ 你给的值里该模型能达到的最高档，只向下）。
- * 网关有模型目录，所以能精确翻译；**直连时我们只有内置的厂商表**
+ * 后端有模型目录，所以能精确翻译；**直连时我们只有内置的厂商表**
  * （见 [VendorEffortProfiles]），于是取「≤ 上限」里**该厂商已知档位中最高的那个**：
  *
  * | 编码 | GATEWAY | DEEPSEEK | OPENAI |
@@ -93,14 +93,14 @@ import kotlinx.serialization.json.put
  *
  * ## 怎么选
  *
- * - 走我们的网关 ⇒ **不用管**（默认 [GATEWAY]）。
+ * - 用自备后端 ⇒ **不用管**（默认 [GATEWAY]）。
  * - 直连 DeepSeek 官方 ⇒ [DEEPSEEK]（`ChatCompletionsClient.deepSeek(...)` 工厂会**按地址自动选**）。
  * - 直连 OpenAI 系 ⇒ [OPENAI]。
  *
  * 拿不准就**显式写出来**：`reasoningWire = ReasoningWire.DEEPSEEK`。
  */
 enum class ReasoningWire {
-    /** 我们网关的私有形状：`reasoning_strength` = 整数强度编码。**默认**。 */
+    /** 自备后端形状：`reasoning_strength` = 整数强度编码，**由自备后端解释该字段**。**默认**。 */
     GATEWAY,
 
     /**
@@ -119,7 +119,7 @@ enum class ReasoningWire {
      * @param strength 强度编码；**null ⇒ 什么都不写**（让对端用它自己的默认档位）。
      *
      * ⚠️ **「什么都不写」不是「没开思考」** ——
-     * 对端默认就是「**思考开 + 强度 high**」（DeepSeek 官方如此；我方网关的服务端默认档也是 high）
+     * 对端默认就是「**思考开 + 强度 high**」（DeepSeek 官方如此；自备后端的服务端默认档也是 high）
      * ⇒ 不写字段 = 开 + 高。**别让人把「没发」读成「没开」。**
      */
     internal fun putStrength(builder: JsonObjectBuilder, strength: Int?) {
@@ -164,7 +164,7 @@ enum class ReasoningWire {
      * 强度编码 → OpenAI 档位名（**取 ≤ 上限的最高已知档**，只向下）。
      *
      * OpenAI 系的已知档位是 `minimal` < `low` < `medium` < `high`（没有更高的），
-     * 所以 16/32（max）落到 `high` —— 与网关那套「只向下」的语义一致。
+     * 所以 16/32（max）落到 `high` —— 与后端那套「只向下」的语义一致。
      *
      * 档位表收在 [VendorEffortProfiles]（内置表的**唯一真源**）。
      */

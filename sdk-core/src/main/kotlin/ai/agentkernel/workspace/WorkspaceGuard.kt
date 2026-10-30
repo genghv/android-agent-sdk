@@ -79,7 +79,7 @@ class WorkspaceGuard(
      * `agent-workspace` / `agent-quota show` 去查 —— 顺带还更符合 agent 的分工
      * （数据是它自己拉的，不是别人塞给它的）。
      *
-     * 另外它必须**短**：网关会把客户端 system 段截到 2000 字符，
+     * 另外它必须**短**：后端会把客户端 system 段截到 2000 字符，
      * 系统提示词本身已占大半，超了这段告警会被**悄悄砍掉**（模型根本看不到）。
      */
     fun alert(): String? {

@@ -32,7 +32,7 @@ import kotlin.test.assertTrue
  *
  * ## 为什么这些要有测试
  *
- * 强度编码传错**不会立刻报错**，可能被网关悄悄降级（只向下）——
+ * 强度编码传错**不会立刻报错**，可能被后端悄悄降级（只向下）——
  * 于是「用户选 high，实际跑 low」没人发现。所以编码本身必须严格：
  * 不是 2 的幂 → **当场拒绝**，别把一个错的值发出去。
  */
@@ -206,7 +206,7 @@ class ReasoningStrengthTest {
 
     @Test
     fun `强度编码进请求体时不会被当成字符串`() {
-        // 是**数值** 8，不是 "8" —— 网关按数值解析。
+        // 是**数值** 8，不是 "8" —— 后端按数值解析。
         val body = Json.parseToJsonElement(bodyOf(2)).jsonObject
         assertEquals("2", body["reasoning_strength"]!!.jsonPrimitive.content)
     }

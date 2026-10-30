@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
 
 /**
  * **真流式传输**（`StreamingTransport`）的契约测试 —— 锁的是「流式」这件事本身的语义，
- * 不是「某个网关的线格式」。
+ * 不是「某个后端的线格式」。
  *
  * ## 这组测试守的是什么
  *

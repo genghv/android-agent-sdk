@@ -162,14 +162,32 @@ class ChatCompletionsClient(
      */
     override suspend fun complete(request: ChatRequest): AssistantMessage = completeStreaming(request)
 
-    /** 非流式：一次性拿到整块 JSON。 */
+    /**
+     * 非流式：一次性拿到整块 JSON。
+     *
+     * ## ⚠️ 对端无视 `stream:false` 仍回 SSE 时，**这里也吃得下**（v1.1.27 起）
+     *
+     * 有些后端不理会 `stream:false`、照样吐 SSE ⇒ 若把它当 JSON 解析会抛
+     * `JsonDecodingException` ⇒ **显式调本方法的宿主会直接崩**。
+     * ⇒ 这里先判一次响应形状：**是 SSE 就按流式那样聚合**
+     * （与 [completeStreaming] 的兜底**同一套口径**：分片内容 / 工具调用的 `arguments` 分片 /
+     * 思维链 / `finish_reason` / 用量都聚合完整，**不能被提前返回截断**）。
+     *
+     * ⇒ **默认路径（[complete] → 流式）一个字都没动**；本方法只是多了一条兜底。
+     */
     suspend fun completeNonStreaming(request: ChatRequest): AssistantMessage {
         val body = buildBody(request, stream = false)
         // ★ 头**只组装一次**：动态取 token 的实现（`bearerDynamic`）每次调用都会现取一次 ——
         //   组装两次就等于取两次 token（第二次的值可能都不同了）。
         val hdrs = headers("application/json")
         val resp = post(request, body, hdrs)
-        return parseAssistant(resp, hdrs)
+        // ⚠️ 对端无视 `stream:false` 仍回 SSE ⇒ 别把 SSE 文本当 JSON 解析（那会抛）。
+        if (!looksLikeSse(resp)) return parseAssistant(resp, hdrs)
+        val assembler = BlockAssembler()
+        SseParser.parse(resp) { data ->
+            assembler.accept(deltaFromChunk(data))
+        }
+        return assemble(assembler)
     }
 
     /**

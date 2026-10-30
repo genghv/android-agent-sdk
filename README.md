@@ -207,6 +207,7 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningWireTest.kt` | **思考强度的线格式**（11 条）：自备后端形状发 `reasoning_strength`（默认，既有调用方零影响）/ **DeepSeek 形状发 `thinking` ＋ `reasoning_effort`（官方是两个独立参数）、绝不发 `reasoning_strength`** / **强度编码只向下落到 DeepSeek 的实际档位（low/high/max）** / 关闭思考只发 `disabled`、不带强度 / **OpenAI 形状只发 `reasoning_effort`** / 取上限内最高的已知档（只向下）/ 强度没设就什么都不发 / `deepSeek` 工厂按地址自动选形状 / 宿主的 `extra` 仍然最后生效 |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/DefaultShapeDetectionTest.kt` | **默认形状判定**（9 条，v1.1.25）：官方域名（带 /v1 / 不带 /v1 / 带尾斜杠 / 带端口 / 大小写不同）⇒ **官方形状** / 其它域名与自建后端 ⇒ **仍是自备后端形状** / **长得像官方但不是官方**（`api.deepseek.com.evil.example`）⇒ 仍是自备后端形状（只看 host **恰好**等于 `api.deepseek.com`）/ **显式指定 `reasoningWire` ⇒ 一律不受影响**（零破坏的关键） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/TrueStreamingTest.kt` | **真流式**（6 条，v1.1.25）：见 `data: [DONE]` **立刻返回**（不等 body 结束）＋ **上游流真的被取消**（不是等它自己结束）/ 跨块**半行**拼回来 / 心跳注释帧（`: hb`）跳过 / 服务端不理会 `stream:true` 仍回整块 JSON 时也照样解析 / **老路（只实现 `Transport`）行为一字不变** |
+| `sdk-core/src/test/kotlin/ai/agentkernel/llm/NonStreamingSseCompatTest.kt` | **非流式入口吃 SSE**（7 条，v1.1.27）：对端无视 `stream:false` 照样吐 SSE ⇒ **不再抛异常**（内容分片**聚合完整**、没被提前返回截断）/ 工具调用的 `arguments` 分片**拼成完整 JSON** / 思维链与 `finish_reason` 都带出来 / 用量照常解析 / **整块 JSON 老路一字不变** / **默认路径 `complete()` 仍发 `stream:true`** / ★ **公开 API 零破坏**（反射钉住公开构造函数的参数类型序列，不许出现新类型） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/StreamingTransportTest.kt` | **真流式传输**（5 条，v1.1.25，裸 `ServerSocket` mock）：**按块吐**（分几次发就分几次拿）/ **取消后立刻返回**（服务端**故意不关连接** ⇒ 传输层不关 socket 就会真卡死；且断言**服务端确实看到客户端断开**）/ **UTF-8 跨块不乱码**（服务端把一个中文字劈成两块发）/ 非 2xx 抛异常且**消息里不含凭据明文** / **既有 `post` 路径没被改坏** |
 | `sdk-android/src/test/kotlin/ai/agentkernel/StreamingTransportAndroidTest.kt` | **Android 侧真流式传输**（4 条，v1.1.25）：OkHttp 实现同样**按块吐**、**取消即断连**、**UTF-8 不乱码**、非 2xx **先抹后截** |
 | `sdk-core/src/test/kotlin/ai/agentkernel/memory/ConversationSummarizerTest.kt` | **摘要失败不再静默**（12 条，v1.1.25）：成功返回正文 / 模型报错 ⇒ null ＋ `SummarizationFailedException` / 返回空也算失败 / **超时** ⇒ null ＋ `SummarizationTimeoutException` / 没内容可压**不算失败**（不留痕）/ **默认不重试**（只调 1 次）/ 开了重试就再试 / 重试用完仍失败 / **超时预算是总上限**（不是每次尝试重开）/ **外层取消不被吞掉**（原样抛、不冒充降级）/ **失败原因里不带凭据明文** |
@@ -220,17 +221,22 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 | `sdk-core/src/test/kotlin/ai/agentkernel/credential/CredentialPathGuardTest.kt` | **门禁：凭据目录的示例路径不许落在 agent 私有根里**（9 条）：扫全仓源码 + 文档代码块，命中即失败（**示例路径属于没人跑过的代码**，照抄就等于把凭据放进 agent 可达范围）/ 规则自己有用例校准（**能逮住那个真实的错误示例**）/ **不误伤**「会话归档仓库本来就在 agent 根里」/ **正文里的反例引用不算违规** |
 | `cipher-contract-test/src/test/kotlin/com/agentsdk/cipher/KeystoreCredentialCipherTest.kt` | **闭源加密核心的契约测试**（**12 条**，源码公开，**默认构建不 include**）：密文包格式与**字节偏移**钉死（magic `ASDC` / nonce 段 / 密文体长度 = 明文 + GCM 标签）/ AAD 绑住「凭据名 + 目标 host」（换任一都解不开）/ 改一个字节、改 nonce 段、截断都解不开 / 每次密封换新 nonce / 密文包里搜不到明文 / **每条负向用例先自证基线是好的**（否则包格式整个坏掉时，这一堆负向用例会**照样全绿**）—— 一键复现见 `scripts/verify-cipher-contract.ps1` |
 
-> 当前全量：**sdk-core 369 条 + sdk-android 59 条**（后者在 debug / release 两个变体各跑一遍），
-> **0 跳过、0 失败、0 错误**（合计 **428 条用例 / 487 次执行**）。
+> 当前全量（**默认构建**）：**sdk-core 440 条 + sdk-android 63 条**（后者在 debug / release 两个变体各跑一遍），
+> **0 跳过、0 失败、0 错误**（合计 **503 条用例 / 566 次执行**）。
+> ＋ 闭源加密核心的**契约测试 12 条**（**默认构建不 include**，要 `-PwithCipherContract=true` 才跑）
+> ⇒ 带契约测试的整轮是 **54 份结果 / 590 次执行**（440 + 63×2 + 12×2 = 590）。
 >
 > ⚠️ **这行数字怎么读**（别把它和别的数相加）：
-> - **487 = 369 + 59×2** —— `sdk-android` 的 59 条在 **debug / release 两个变体各跑一遍**
->   ⇒ **用例条数是 428**（不是 487），487 是**执行次数**；
+> - **566 = 440 + 63×2** —— `sdk-android` 的 63 条在 **debug / release 两个变体各跑一遍**
+>   ⇒ **用例条数是 503**（不是 566），566 是**执行次数**；
+> - **590 = 566 + 24** —— 那 24 次是**闭源加密核心的契约测试**（12 条 × 2 变体），
+>   **默认构建不跑** ⇒ 别把它算进「默认构建」那一栏；
 > - **真机仪器化那 9 条不计入本数** —— 那 9 条要设备（本机长期离线），
->   **487 全是 JVM 用例** ⇒ 「428 + 9 = 437」是把两套互不相干的东西加在一起，**不成立**。
+>   **566 全是 JVM 用例** ⇒ 「503 + 9 = 512」是把两套互不相干的东西加在一起，**不成立**。
 >
 > ★ 这行数字**必须与实际在跑的那一份一致** —— 它曾陈旧了 **4 个版本**（一直写着 359，
-> 实际从 v1.1.15 起已是 362、v1.1.16 起 369），直到 v1.1.19 才被发现
+> 实际从 v1.1.15 起已是 362、v1.1.16 起 369），直到 v1.1.19 才被发现；
+> **v1.1.27 复核时又发现它停在 v1.1.19 的 369/59**（实际已是 440/63）⇒ 本轮按实测改正
 > ⇒ **每版发版前重新量一遍，别抄上一版的数字**。
 
 > 交付包原本的自测是一份手工 `main()`（`selftest/SelfTest.kt`），需要 661MB 的 `.toolchain/`

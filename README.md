@@ -143,6 +143,8 @@ sdk-core/src/main/kotlin/ai/agentkernel/
 │   └── openai/
 │       ├── ChatCompletionsClient.kt  # 请求组装 + 响应解析 + 流式聚合
 │       ├── SseParser.kt
+│       ├── StreamingTransport.kt      # **可选**的真流式传输能力（Transport 一字未改）
+│       ├── StreamingCompletion.kt     # 真流式的 SSE 消费（跨块半行缓冲 + 见 [DONE] 即停）
 │       ├── Transport.kt              # HTTP 抽象
 │       └── JdkHttpTransport.kt       # JVM 用
 └── tools/
@@ -203,6 +205,12 @@ gradle build                               # 全量：编译 + AAR + 测试 + li
 | `sdk-core/src/test/kotlin/ai/agentkernel/tools/exec/ExecOutputTruncationTest.kt` | **工具输出截断**（5 条）：**总长 ≤ 上限**（标记行算进预算）/ 默认上限也是硬线 / **标记里的「省略 N 字符」等于真正没露出来的原文数**（输出大到位数变化时也不失真）/ 上限小到放不下标记时给原文开头，**不返回空串** |
 
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningWireTest.kt` | **思考强度的线格式**（11 条）：网关形状发 `reasoning_strength`（默认，既有调用方零影响）/ **DeepSeek 形状发 `thinking` ＋ `reasoning_effort`（官方是两个独立参数）、绝不发 `reasoning_strength`** / **强度编码只向下落到 DeepSeek 的实际档位（low/high/max）** / 关闭思考只发 `disabled`、不带强度 / **OpenAI 形状只发 `reasoning_effort`** / 取上限内最高的已知档（只向下）/ 强度没设就什么都不发 / `deepSeek` 工厂按地址自动选形状 / 宿主的 `extra` 仍然最后生效 |
+| `sdk-core/src/test/kotlin/ai/agentkernel/llm/DefaultShapeDetectionTest.kt` | **默认形状判定**（9 条，v1.1.25）：官方域名（带 /v1 / 不带 /v1 / 带尾斜杠 / 带端口 / 大小写不同）⇒ **官方形状** / 其它域名与自建网关 ⇒ **仍是网关形状** / **长得像官方但不是官方**（`api.deepseek.com.evil.example`）⇒ 仍是网关形状（只看 host **恰好**等于 `api.deepseek.com`）/ **显式指定 `reasoningWire` ⇒ 一律不受影响**（零破坏的关键） |
+| `sdk-core/src/test/kotlin/ai/agentkernel/llm/TrueStreamingTest.kt` | **真流式**（6 条，v1.1.25）：见 `data: [DONE]` **立刻返回**（不等 body 结束）＋ **上游流真的被取消**（不是等它自己结束）/ 跨块**半行**拼回来 / 心跳注释帧（`: hb`）跳过 / 服务端不理会 `stream:true` 仍回整块 JSON 时也照样解析 / **老路（只实现 `Transport`）行为一字不变** |
+| `sdk-core/src/test/kotlin/ai/agentkernel/llm/StreamingTransportTest.kt` | **真流式传输**（5 条，v1.1.25，裸 `ServerSocket` mock）：**按块吐**（分几次发就分几次拿）/ **取消后立刻返回**（服务端**故意不关连接** ⇒ 传输层不关 socket 就会真卡死；且断言**服务端确实看到客户端断开**）/ **UTF-8 跨块不乱码**（服务端把一个中文字劈成两块发）/ 非 2xx 抛异常且**消息里不含凭据明文** / **既有 `post` 路径没被改坏** |
+| `sdk-android/src/test/kotlin/ai/agentkernel/StreamingTransportAndroidTest.kt` | **Android 侧真流式传输**（4 条，v1.1.25）：OkHttp 实现同样**按块吐**、**取消即断连**、**UTF-8 不乱码**、非 2xx **先抹后截** |
+| `sdk-core/src/test/kotlin/ai/agentkernel/memory/ConversationSummarizerTest.kt` | **摘要失败不再静默**（11 条，v1.1.25）：成功返回正文 / 模型报错 ⇒ null ＋ `SummarizationFailedException` / 返回空也算失败 / **超时** ⇒ null ＋ `SummarizationTimeoutException` / 没内容可压**不算失败**（不留痕）/ **默认不重试**（只调 1 次）/ 开了重试就再试 / 重试用完仍失败 / **超时预算是总上限**（不是每次尝试重开）/ **外层取消不被吞掉**（原样抛、不冒充降级）/ **失败原因里不带凭据明文** |
+| `sdk-core/src/test/kotlin/ai/agentkernel/llm/EffortCatalogTest.kt` | **档位清单兜底**（9 条，v1.1.25）：`fetchOrNull` 拉不到返回 null（**不抛**）/ 报文不认也返回 null / 拉得到返回清单 / **`fetch` 行为未变**（仍抛）/ `resolve` 三态：**server 为 null ⇒ BUILTIN** / **有服务端清单 ⇒ SERVER**（levels 用服务端那份）/ **宿主给了 ⇒ USER**（压过服务端） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/ReasoningContentPassthroughTest.kt` | **思维链回传**（8 条）：**带 tools 的请求里，历史中每一条 assistant 的思维链都要回传** —— **包括模型那一回合没调工具的**（漏了上游 400）/ 纯文本回合的思维链**照旧要带** / 没有思维链就不带这个字段 / 空串不算「有」/ **线格式与归档那份同一口径**（不会出现「归档里有、回传没了」） |
 | `sdk-core/src/test/kotlin/ai/agentkernel/llm/RequestShapeSummaryTest.kt` | **上游失败时的请求形状摘要**（5 条）：上游 400 时错误信息里**带得上形状**（消息数 / assistant 条数 / 带思维链条数 / 带工具调用条数 / 工具结果条数 / 带不带 tools）/ **一个字的正文都不带**（思维链只记总字符数）/ **原错误信息与异常类型都不变**（宿主的 catch 与日志匹配不受影响）/ 成功路径不受影响 |
 
@@ -426,8 +434,8 @@ val client = ChatCompletionsClient(
 | `baseUrl` / `apiKey` | `ChatCompletionsClient` | 服务地址与鉴权 |
 | `model` | `AndroidAgentSdk` | 模型名。DeepSeek 官方：`deepseek-chat`（不思考、快）/ `deepseek-reasoner`（会推理） |
 | `maxTokens` | `AndroidAgentSdk` | 回答的 token 上限（`max_tokens`）。**不填就不带这个字段**，由服务端用默认值 |
-| `reasoningStrength` | `AndroidAgentSdk` | 思考强度的**强度编码**（2 的幂：1=关闭思考 / 2=low / 4=medium / 8=high / 16=max）。**不填就不带**，由服务端用默认档；它是**上限**（服务端只向下取）。合法档位用 `EffortCatalogClient` 问服务端要，别自己抄 |
-| `reasoningWire` | `ChatCompletionsClient` | 思考强度的**线格式**（`ReasoningWire`）：`GATEWAY`（默认，发 `reasoning_strength`）/ `DEEPSEEK`（发 `thinking` ＋ `reasoning_effort`，**官方是两个独立参数**）/ `OPENAI`（发 `reasoning_effort`）。**直连厂商官方时必须换** —— `reasoning_strength` 是网关私有字段，发给厂商只会被忽略或 400（**静默不生效**）。`deepSeek(...)` 工厂按地址自动选 |
+| `reasoningStrength` | `AndroidAgentSdk` | 思考强度的**强度编码**（2 的幂：1=关闭思考 / 2=low / 4=medium / 8=high / 16=max）。**不填就不带**，由服务端用默认档；它是**上限**（服务端只向下取）。合法档位用 `EffortCatalogClient` 问服务端要，别自己抄。<br>⚠ **「不填」≠「没开思考」**：对端默认就是**思考开 + 强度 high**（DeepSeek 官方如此，我方网关的默认档也是 high）⇒ **不填 = 开 + 高**。UI 与文案别让人读反了 |
+| `reasoningWire` | `ChatCompletionsClient` | 思考强度的**线格式**（`ReasoningWire`）：`GATEWAY`（默认，发 `reasoning_strength`）/ `DEEPSEEK`（发 `thinking` ＋ `reasoning_effort`，**官方是两个独立参数**）/ `OPENAI`（发 `reasoning_effort`）。**直连厂商官方时必须换** —— `reasoning_strength` 是网关私有字段，发给厂商只会被忽略或 400（**静默不生效**）。`deepSeek(...)` 工厂**按官方域名自动选**（host 恰好是 `api.deepseek.com` ⇒ 官方形状；其它一切地址 ⇒ 网关形状） |
 | `temperature` | `AndroidAgentSdk` | 采样温度 |
 | `extraRequest` | `AndroidAgentSdk` | 透传任意 JSON 字段（厂商扩展参数） |
 | `maxTurns` | `AndroidAgentSdk` | 一轮最多几次模型往返，默认 32 |

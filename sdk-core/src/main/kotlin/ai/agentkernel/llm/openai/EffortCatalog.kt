@@ -1,5 +1,6 @@
 package ai.agentkernel.llm.openai
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -72,6 +73,9 @@ class EffortCatalogException(message: String, cause: Throwable? = null) : Except
  * 让调用方自己决定是「用默认档位」还是「显式提示用户档位不可用」。
  * 悄悄塞一份本地默认表 = 用户以为选的是服务端支持的档，实际不是。
  *
+ * ⚠️ 但**档位清单不是启动前提** ⇒ 不想处理异常的调用方用
+ * [fetchOrNull]（拉不到返回 null ⇒ 退回内置表，见 [VendorEffortProfiles.resolve]）。
+ *
  * ## 典型用法
  * ```
  * val catalog = EffortCatalogClient(baseUrl, OkHttpTransport(), LlmAuth.bearer(token)).fetch()
@@ -100,6 +104,35 @@ class EffortCatalogClient(
             throw EffortCatalogException("拉档位清单失败（$baseUrl$catalogPath）：${e.message}", e)
         }
         return parse(raw)
+    }
+
+    /**
+     * 拉清单；**拉不到返回 null**（不抛）。
+     *
+     * ## 为什么要有它
+     *
+     * [fetch] 的行为一个字都没变（仍然抛 [EffortCatalogException]）——
+     * 「清单拉不到」这件事本身要**看得见**，否则调用方会以为档位来自服务端。
+     *
+     * 但**档位清单是锦上添花，不是启动前提**：
+     * 服务端不可用 / 报文不认 / 强度编码非法 ⇒ 宿主**不该起不来**
+     * （用户定的口径：「云端不依赖云端可得性」）。
+     *
+     * ⇒ 这个入口给「拉不到就退回内置表」的场景用：
+     * ```
+     * val catalog = client.fetchOrNull()          // 拉不到 ⇒ null
+     * val profile = VendorEffortProfiles.resolve(wire, server = catalog)  // ⇒ BUILTIN
+     * ```
+     *
+     * ⚠️ **取消不是「拉不到」**：调用方把这一轮撤了时，取消异常**原样抛出**
+     * （不当成 null —— 那会让上层以为「服务端没给清单」，其实是没问成）。
+     */
+    suspend fun fetchOrNull(): EffortCatalog? = try {
+        fetch()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
     }
 
     /** 解析清单报文。 */

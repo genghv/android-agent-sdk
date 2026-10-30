@@ -88,6 +88,35 @@ class ChatCompletionsClient(
         const val DEEPSEEK_BASE_URL: String = "https://api.deepseek.com/v1"
 
         /**
+         * DeepSeek 官方的**域名**（判定用；不含路径、不含端口）。
+         *
+         * 为什么存域名而不是整条地址：地址可能是
+         * `https://api.deepseek.com/v1`、`https://api.deepseek.com`、
+         * `https://api.deepseek.com:8443/v1`、`https://api.deepseek.com/v1/`……
+         * **只按整串相等判 ⇒ 漏掉一大半** ⇒ 「拿了官方地址却忘了选形状」这种误用会静默不生效。
+         */
+        const val DEEPSEEK_OFFICIAL_HOST: String = "api.deepseek.com"
+
+        /**
+         * 地址是不是 **DeepSeek 官方**（**按域名**判，不看路径、不看端口、不看大小写）。
+         *
+         * - 官方域名 ⇒ 自动用 [ReasoningWire.DEEPSEEK]（**修复**：此前发的是网关私有字段，
+         *   厂商不认 ⇒ 忽略 ⇒ 静默不生效）；
+         * - 其它一切地址（自建网关、代理、别的厂商）⇒ 保持 [ReasoningWire.GATEWAY]（**零破坏**）。
+         *
+         * ⚠️ **只影响「没显式指定 `reasoningWire`」的调用方** —— 显式传了的**一律不受影响**。
+         */
+        internal fun isDeepSeekOfficial(baseUrl: String): Boolean {
+            // URI.host 不含端口、路径；大小写不敏感地比。
+            val host = try {
+                java.net.URI(baseUrl).host
+            } catch (e: Exception) {
+                null
+            } ?: return false
+            return host.equals(DEEPSEEK_OFFICIAL_HOST, ignoreCase = true)
+        }
+
+        /**
          * 一行接上 DeepSeek 官方（地址用官方的，鉴权走 `Authorization: Bearer`）。
          *
          * ```
@@ -102,11 +131,12 @@ class ChatCompletionsClient(
             /**
              * 思考强度的线格式。
              *
-             * **默认按地址自动选**：地址是 DeepSeek 官方 ⇒ [ReasoningWire.DEEPSEEK]
-             * （官方只认 `thinking`；发网关的 `reasoning_strength` 会被忽略 ⇒ 静默不生效）；
+             * **默认按地址自动选**：地址是 **DeepSeek 官方域名** ⇒ [ReasoningWire.DEEPSEEK]
+             * （官方形状发的是 `thinking` ＋ `reasoning_effort`，见 [ReasoningWire]；
+             *   `reasoning_strength` 是**网关形状**的字段名，直连厂商不认它 ⇒ 忽略或 400）；
              * 换成别的地址（自建网关）⇒ 保持 [ReasoningWire.GATEWAY]（与以前一样）。
              */
-            reasoningWire: ReasoningWire = if (baseUrl == DEEPSEEK_BASE_URL) {
+            reasoningWire: ReasoningWire = if (isDeepSeekOfficial(baseUrl)) {
                 ReasoningWire.DEEPSEEK
             } else {
                 ReasoningWire.GATEWAY
@@ -142,27 +172,51 @@ class ChatCompletionsClient(
         return parseAssistant(resp, hdrs)
     }
 
-    /** 流式：把 SSE 分片经 BlockAssembler 聚合后再返回（arguments 必须聚合才完整）。 */
+    /**
+     * 流式：把 SSE 分片经 BlockAssembler 聚合后再返回（arguments 必须聚合才完整）。
+     *
+     * ## 真流式 vs 假流式
+     *
+     * - 传输实现了 [StreamingTransport] ⇒ **真流式**：逐块喂，**见到 `data: [DONE]` 立刻返回**
+     *   （不等 HTTP body 结束 ⇒ 服务端早就答完了，客户端就不用再干等）。
+     * - 传输只实现了 [Transport] ⇒ **假流式**（老路）：一次性拿到整块 body 再解析
+     *   ⇒ 必须等 body **整个结束**。
+     *
+     * ⇒ [Transport] 一个字都没改 ⇒ **既有调用方零影响**（不实现新接口照样能用）。
+     */
     suspend fun completeStreaming(request: ChatRequest): AssistantMessage {
         val body = buildBody(request, stream = true)
         val hdrs = headers("text/event-stream")
-        val raw = post(request, body, hdrs)
-        // 有些服务端不理会 stream:true，仍回一整块 JSON。
-        // 那不能当成「一条没有内容的流」—— 那样会静默丢掉模型说的话。
-        if (!looksLikeSse(raw)) return parseAssistant(raw, hdrs)
         val assembler = BlockAssembler()
+        val streaming = transport as? StreamingTransport
+        if (streaming != null) {
+            val outcome = withShapeSummary(request, hdrs) {
+                StreamingCompletion.consume(
+                    streaming.postStream("$baseUrl$chatPath", hdrs, body),
+                ) { data -> assembler.accept(deltaFromChunk(data)) }
+            }
+            // 有些服务端不理会 stream:true，仍回一整块 JSON。
+            // 那不能当成「一条没有内容的流」—— 那样会静默丢掉模型说的话。
+            if (outcome.dataCount == 0) return parseAssistant(outcome.raw, hdrs)
+            return assemble(assembler)
+        }
+        val raw = post(request, body, hdrs)
+        if (!looksLikeSse(raw)) return parseAssistant(raw, hdrs)
         SseParser.parse(raw) { data ->
             assembler.accept(deltaFromChunk(data))
         }
-        return AssistantMessage(
-            content = assembler.content(),
-            toolCalls = assembler.toolCalls(),
-            reasoningContent = assembler.reasoning(),
-            finishReason = assembler.finishReason(),
-            usage = assembler.usage(),
-            prefix = assembler.prefix(),
-        )
+        return assemble(assembler)
     }
+
+    /** 聚合器 → 最终消息（流式 / 非流式共用一份口径）。 */
+    private fun assemble(assembler: BlockAssembler): AssistantMessage = AssistantMessage(
+        content = assembler.content(),
+        toolCalls = assembler.toolCalls(),
+        reasoningContent = assembler.reasoning(),
+        finishReason = assembler.finishReason(),
+        usage = assembler.usage(),
+        prefix = assembler.prefix(),
+    )
 
     private fun headers(accept: String): Map<String, String> =
         mapOf(
@@ -199,12 +253,26 @@ class ChatCompletionsClient(
      * ⇒ 这里**只搬栈**（`stackTrace` 原样复制过去），**不保留原异常对象**。
      */
     private suspend fun post(request: ChatRequest, body: String, hdrs: Map<String, String>): String =
-        try {
+        withShapeSummary(request, hdrs) {
             transport.post(
                 url = "$baseUrl$chatPath",
                 headers = hdrs,
                 body = body,
             )
+        }
+
+    /**
+     * 上游报错时**补上请求形状**（凭据先抹、异常类型与栈原样保留）。
+     *
+     * 流式与非流式**共用**这一套 ⇒ 两条路的错误消息口径完全一致。
+     */
+    private suspend fun <T> withShapeSummary(
+        request: ChatRequest,
+        hdrs: Map<String, String>,
+        block: suspend () -> T,
+    ): T =
+        try {
+            block()
         } catch (e: IllegalStateException) {
             val safe = IllegalStateException(
                 "${HeaderRedaction.redact(e.message ?: "", hdrs)}\n请求形状：${shapeSummary(request)}"

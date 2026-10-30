@@ -16,6 +16,7 @@ import ai.agentkernel.llm.openai.ChatCompletionsClient
 import ai.agentkernel.llm.openai.EffortCatalog
 import ai.agentkernel.llm.openai.EffortCatalogClient
 import ai.agentkernel.llm.openai.LlmAuth
+import ai.agentkernel.llm.openai.ReasoningStrength
 import ai.agentkernel.memory.ContextMemory
 import ai.agentkernel.memory.ContextPolicy
 import ai.agentkernel.memory.MemoryEntry
@@ -300,8 +301,22 @@ class DemoState(app: Application) : AndroidViewModel(app) {
      * ★ **持久化的是 strength，不是 key / index** ——
      * `key` 换模型就变（`deepseek-flash` 没有 medium，同一个编号在不同模型上指不同档），
      * `index` 只是显示顺序。strength 跨模型稳定，用户存的值换模型后仍然有效。
+     *
+     * ★ **首次进入的默认 = 高（8）**：用户口径「首次进入 = 思考开 + 高」。
+     *   厂商默认也是 high（DeepSeek 官方 effort 默认 high；网关服务端默认档同样是 high）
+     *   ⇒ 这里**显式落一个值**，不靠任何一方的默认值 ——
+     *   「界面显示高」和「实际发出去的就是高」必须是同一件事。
+     *   （老设备上存过 0 = 「服务端默认档」的保持原样，不迁移。）
+     *
+     * ★ **一个值就够，「开启」不必单独存**：这个编码同时表达了「开不开」和「哪一档」——
+     *   `1` = 关闭思考（[ReasoningStrength.OFF]）、`2`=low、`4`=medium、`8`=high、`16`=max、`32`=xhigh。
+     *   两条投送路径**都认这一个值**：直连 ⇒ 翻成 `thinking.type` + `reasoning_effort`；
+     *   投我方网关 ⇒ 翻成 `reasoning_strength`（网关按「≤ 上限的最高可用档」取档）。
+     *   ⇒ 宿主只管存这一个值，**两套线格式由 SDK 那一个方法各自翻译**，宿主不必分两套逻辑。
      */
-    var reasoningStrength by mutableStateOf(prefs.getInt(KEY_STRENGTH, 0).takeIf { it > 0 })
+    var reasoningStrength by mutableStateOf(
+        prefs.getInt(KEY_STRENGTH, ReasoningStrength.HIGH.value).takeIf { it > 0 },
+    )
         private set
 
     /** 选一档（传 strength）。传 null = 用服务端默认。 */
@@ -1117,9 +1132,11 @@ class DemoState(app: Application) : AndroidViewModel(app) {
                 //   直连 DeepSeek 官方没有这个限制，那边可以用 SDK 的默认值 FULL。
                 // ★ 用 DemoState.commandDetail —— 和自检那份**同一个值**（否则自检在验另一份）。
                 commandDetail = commandDetail,
-                // ★ 思考强度：传**强度编码**（2 的幂，跨模型稳定）。
+                // ★ 思考强度：传**强度编码**（2 的幂，跨模型稳定）—— **一个值，两条路径共用**。
                 //   null = 不带这个字段，由服务端用它的默认档位。
                 //   它是「上限」：服务端取「强度 ≤ 给的值」里该模型能达到的最高档（只向下）。
+                //   `1` = 关闭思考（两侧都认：直连翻成 thinking.type=disabled，网关翻成 reasoning_strength=1）。
+                //   其它值 ⇒ 直连翻成 thinking{enabled} + reasoning_effort，网关翻成 reasoning_strength。
                 reasoningStrength = reasoningStrength,
                 // ★ 工作区守卫：超配额时自动把告警注入这一轮，让 agent 自己清理。
                 workspaceGuard = workspace.guard,

@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  * 所以这里用**真机同款输入**在 JVM 上复刻一遍：
  * - 路径 = 真机包名的 filesDir（`/data/user/0/<pkg>/files`）；
  * - 命令清单 = 真机探测到的白名单命中集（白名单去掉这台机器上没有的两个）；
- * - 能力清单 = 那 14 个命令的 usage 字符串（6 个 termux-* + 8 个 agent-*）；
+ * - 能力清单 = 那 15 个命令的 usage 字符串（6 个 termux-* + 9 个 agent-*）；
  *   ★ 必须是**真机真实注册的那几条** —— 真机注册了记忆与文本能力，
  *   这里就也得列上；少列一条 = 测出来的长度比真机短，「真机装不下」会假绿。
  * - 配额策略 = 宿主默认（设备剩余空间的 5%）。
@@ -70,6 +70,10 @@ class DevicePromptBudgetTest {
             //   而真机上恰恰是它们把提示词顶到了预算边缘。
             Fake("memory", CapabilityOrigin.INTERNAL, "agent-memory <list|get <id>|add \"<正文>\"|edit <id> \"<正文>\"|patch <id> <补丁规格>|delete <id>|search \"<关键词>\">", "agent-memory <list|get|add|edit|patch|delete|search>"),
             Fake("text", CapabilityOrigin.INTERNAL, "agent-text <read <相对路径>|patch <相对路径> <补丁规格>>", "agent-text <read|patch>"),
+            // ★ `agent-cred` 也必须在列表里 —— 真机（演示 App）**注册了凭据能力**
+            //   （`defaultDeviceCapabilities(..., credential = ...)`）⇒ 它的用法行也进真机提示词。
+            //   少了它 = 测出来的长度比真机短 ⇒「真机其实装不下」会**假绿**。
+            Fake("cred", CapabilityOrigin.INTERNAL, "agent-cred <list|status <name>>", "agent-cred <list|status>"),
         )
     )
 
@@ -182,11 +186,12 @@ class DevicePromptBudgetTest {
          * 真正动锚点的是**环境段以外**的正文（比如能力段多一条命令）。
          *
          * 历史：真机首次量到 2057；提示词正文改写后为 2045；
-         * 能力清单补齐 `agent-memory` / `agent-text` 两条（真机注册了什么，这里就得列什么）后为 2126。
+         * 能力清单补齐 `agent-memory` / `agent-text` 两条（真机注册了什么，这里就得列什么）后为 2126；
+         * 再补齐 `agent-cred`（真机演示 App 注册了凭据能力）后为 **2153**。
          *
          * ★ **改动这份清单后一定要重量**：清单少一条 = 测出来的长度比真机短，
          *   于是「真机其实装不下」这条测试会假绿 —— 这比测试红更糟。
          */
-        private const val OLD_ENV_ANCHOR = 2126
+        private const val OLD_ENV_ANCHOR = 2153
     }
 }

@@ -82,7 +82,8 @@ find . -name "*.jpg" | head -20
 ### SDK 自制的命令（`agent-*`）
 
 这批不在 Termux:API 里，是这套环境特有的：
-`agent-workspace` / `agent-cleanup` / `agent-quota` / `agent-schedule` / `agent-http-*`。
+`agent-workspace` / `agent-cleanup` / `agent-quota` / `agent-schedule` / `agent-http-*`
+/ `agent-memory` / `agent-text` / `agent-cred`。
 详见 [agent-workspace](../agent-workspace/SKILL.md)、[agent-data-api](../agent-data-api/SKILL.md)、
 [agent-scheduling](../agent-scheduling/SKILL.md)。
 

@@ -106,6 +106,11 @@ class MainActivity : ComponentActivity() {
         //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_cred true
         //   adb logcat -d -s AgentSdkDemo | Select-String 'CRED\|'
         val autorunCred = intent?.getBooleanExtra("autorun_cred", false) ?: false
+        // 命令行跑**非流式入口**自检（验「对端无视 stream:false 照样回 SSE」时也能聚合出完整回答）：
+        //   adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity --ez autorun_nonstreaming true
+        //   adb logcat -d -s AgentSdkDemo | Select-String 'NONSTREAM\|'
+        // 判据要严 ⇒ 把**已知全文**也注入（--es autorun_nonstreaming_expect "<完整正文>"）。
+        val autorunNonStreaming = intent?.getBooleanExtra("autorun_nonstreaming", false) ?: false
         // 后端配置也能从命令行注入（**运行时**的，token 不进 APK）：
         //   --es gateway_url ... --es gateway_token ... --es gateway_model ...
         // 思考强度用**强度编码**注入（2 的幂：1=关闭思考 2=low 4=medium 8=high 16=max）：
@@ -122,6 +127,11 @@ class MainActivity : ComponentActivity() {
             intent?.getIntExtra("autorun_memory_max_chars", 0)?.takeIf { it > 0 },
             intent?.getIntExtra("autorun_memory_idle_min", 0)?.takeIf { it > 0 },
         )
+        // 非流式自检的**期望全文**（判据要用「与全文**逐字相等**」才验得出「聚合完整」——
+        // 只判「非空」的话，少聚合一片也会判过）：
+        //   --es autorun_nonstreaming_expect "pong"
+        // 不传这一项 ⇒ 退回「非空」判据（旧用法不破），日志里会写明用的是哪条判据。
+        state.applyNonStreamingExpect(intent?.getStringExtra("autorun_nonstreaming_expect"))
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 DemoApp(
@@ -136,6 +146,7 @@ class MainActivity : ComponentActivity() {
                     autorunArchivePaging,
                     autorunPatch,
                     autorunCred,
+                    autorunNonStreaming,
                 )
             }
         }
@@ -156,13 +167,15 @@ fun DemoApp(
     autorunArchivePaging: Boolean = false,
     autorunPatch: Boolean = false,
     autorunCred: Boolean = false,
+    autorunNonStreaming: Boolean = false,
 ) {
     var tab by remember {
         mutableStateOf(
             when {
                 autorunArchive -> 3
                 !autorunChat.isNullOrBlank() || !autorunChatMulti.isNullOrBlank() -> 2
-                autorunSelfCheck || autorunTorch || autorunMemory || autorunPatch || autorunCred -> 1
+                autorunSelfCheck || autorunTorch || autorunMemory || autorunPatch || autorunCred ||
+                    autorunNonStreaming -> 1
                 else -> 0
             },
         )
@@ -181,12 +194,13 @@ fun DemoApp(
     // 两条路径**互斥**（一次只跑一条），免得并发抢同一个 torch。
     // ★ 一律走 state.start*() —— 它们在 **viewModelScope** 里跑，
     //   activity 重建不会把正在跑的 agent 循环掐断（详见 DemoState.startChatAutorun）。
-    LaunchedEffect(autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory, autorunPatch, autorunCred) {
+    LaunchedEffect(autorunSelfCheck, autorunTorch, autorunChat, autorunChatMulti, autorunEfforts, autorunMemory, autorunPatch, autorunCred, autorunNonStreaming) {
         android.util.Log.i(
             "AgentSdkDemo",
             "[CHAT] [effect-enter] selfcheck=$autorunSelfCheck torch=$autorunTorch " +
                 "chatLen=${autorunChat?.length} multiLen=${autorunChatMulti?.length} efforts=$autorunEfforts " +
-                "memory=$autorunMemory patch=$autorunPatch cred=$autorunCred",
+                "memory=$autorunMemory patch=$autorunPatch cred=$autorunCred " +
+                "nonstream=$autorunNonStreaming",
         )
         if (autorunTorch) {
             state.startTorchCheck()
@@ -200,6 +214,8 @@ fun DemoApp(
             state.startPatchCheck()
         } else if (autorunCred) {
             state.startCredentialCheck()
+        } else if (autorunNonStreaming) {
+            state.startNonStreamingCheck()
         } else if (!autorunChatMulti.isNullOrBlank()) {
             // 多轮：用来观察缓存命中率随轮次的上升曲线。
             state.startChatMultiAutorun(

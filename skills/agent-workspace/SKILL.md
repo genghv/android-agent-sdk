@@ -91,6 +91,9 @@ rm -f 文件名                               # 删
 | `agent-quota reset` | 改回宿主的默认值 |
 | `agent-schedule list/add/remove/due` | 定时任务（见 `agent-scheduling` 技能） |
 | `agent-http-get` / `agent-http-post` | 调宿主接口取数据（见 `agent-data-api` 技能） |
+| `agent-memory list/get/add/edit/patch/delete/search` | 长期记忆增删改查（见 `agent-memory` 技能） |
+| `agent-text read` / `agent-text patch` | 按**行**读 / 改沙箱里的文本文件（见 `agent-text` 技能） |
+| `agent-cred list` / `agent-cred status <name>` | 凭据目录（**只读、永远不吐明文**，见 `agent-cred` 技能） |
 
 ## 三、你不能做的事
 

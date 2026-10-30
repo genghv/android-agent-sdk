@@ -25,6 +25,7 @@ import ai.agentkernel.memory.MemoryStore
 import ai.agentkernel.prompt.AgentSystemPrompt
 import ai.agentkernel.protocol.AssistantMessage
 import ai.agentkernel.protocol.ChatMessage
+import ai.agentkernel.protocol.ChatRequest
 import ai.agentkernel.protocol.SystemMessage
 import ai.agentkernel.protocol.ToolMessage
 import ai.agentkernel.protocol.UserMessage
@@ -1965,6 +1966,214 @@ class DemoState(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * 非流式自检的**期望全文**（命令行注入：`--es autorun_nonstreaming_expect "<完整正文>"`）。
+     *
+     * ★ 为什么必须有它：只判「非空」**验不出「聚合完整」** ——
+     *   若对端把正文切成多片，而客户端只聚合到第一片，正文**照样非空** ⇒ 判据会**误放行**
+     *   （把「没崩」当成了「跑通」）。
+     *   ⇒ 给出已知全文后，判据才能是「**与全文逐字相等**」，少一片都不放过。
+     *
+     * **不给这个值时**：① 退回「非空」判据（旧用法不破），但日志里会写明用的是哪条
+     * （`判据=仅非空（未注入期望全文）`）⇒ 脚本读 verdict 行就知道这条判据够不够硬。
+     */
+    var nonStreamingExpect: String? = null
+        private set
+
+    /** 注入期望全文（空串按「没给」处理）。 */
+    fun applyNonStreamingExpect(expect: String?) {
+        nonStreamingExpect = expect?.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * 命令行触发的**非流式入口**自检（v1.1.28 新增）。
+     *
+     * ## 为什么要有它
+     *
+     * 有些后端**不理会 `stream:false`、照样吐 SSE**。
+     * 宿主若显式调非流式入口（`ChatCompletionsClient.completeNonStreaming`），
+     * 旧版会把 SSE 当 JSON 解析 ⇒ 抛 `JsonDecodingException` ⇒ **宿主直接崩**。
+     *
+     * demo 此前**没有任何显式调它的入口** ⇒ 那条修复的真机证据一直是空的
+     * （只有单元层的回归 + 反向验证）。
+     *
+     * ## 怎么触发
+     *
+     * ```
+     * adb shell am start -S --activity-clear-task -n com.agentkernel.demo/.MainActivity \
+     *     --ez autorun_nonstreaming true \
+     *     --es autorun_nonstreaming_expect "pong" \
+     *     --es gateway_url "http://127.0.0.1:43911/v1" \
+     *     --es gateway_token "sk-mock-not-real"
+     * adb logcat -d -s AgentSdkDemo | Select-String 'NONSTREAM\|'
+     * ```
+     *
+     * ★ 对端要**无视 `stream:false` 照样回 SSE** 才是这个用例（本地 mock 就是这么做的）
+     *   ⇒ 回整块 JSON 的后端走不到 SSE 判定那一步。
+     */
+    fun startNonStreamingCheck() {
+        DemoRuntime.startOncePerProcess("nonstreamingcheck") { runNonStreamingCheck() }
+    }
+
+    /**
+     * 跑非流式入口自检 —— 三项：
+     *
+     * ① **非流式入口拿到完整回答**（对端回 SSE 时也要聚合得出**完整**内容）；
+     * ② **对照组：默认路径（流式）同场景仍正常**；
+     * ③ **两条路径的正文逐字一致**。
+     *
+     * ★ 第②项是**对照组**，且**独立于①**：
+     *   反向验证（换成没有该修复的旧版字节）时，①会抛异常、**②仍应是绿的** ——
+     *   这正是「崩的是①那条路、不是环境问题」的关键信号；
+     *   ⇒ 如果②依赖①的结果，这个信号就会被一起抹掉。
+     *
+     * ★ 第③项才管「两条路内容一致」：**一致地错**（两条都只聚合到第一片）也会 same=true，
+     *   所以一致性必须**单独判**，而①要用**期望全文**判（见 [nonStreamingExpect]）。
+     */
+    suspend fun runNonStreamingCheck() {
+        if (gatewayUrl.isBlank() || gatewayToken.isBlank()) {
+            logNonStream("precondition", false, "❌ 没配后端地址/token，验不了")
+            return
+        }
+        // ★ 复用现成的 client（与对话页同一个实例 ⇒ 同一套鉴权与线格式）。
+        val client = clientAndMemory().first
+        val req = ChatRequest(
+            model = gatewayModel,
+            messages = listOf(UserMessage("ping")),
+            // 顺带带上思考强度编码 ⇒ 顺便验「非流式路径也带这个字段」。
+            reasoningStrength = reasoningStrength,
+            // ★ stream 保持 false —— 这正是「显式走非流式入口」的前提。
+        )
+
+        // ★ 判据分两种：给了期望全文 ⇒ 「逐字相等」；没给 ⇒ 退回「非空」（并在日志里说明用的是哪条）。
+        val expect = nonStreamingExpect
+        val criterion = if (expect != null) "与期望全文逐字相等" else "仅非空（未注入期望全文）"
+
+        // ---- ① 非流式入口：对端回 SSE 时也要能聚合出完整回答 ----
+        val t0 = System.currentTimeMillis()
+        var nsContent: String? = null
+        try {
+            val msg = client.completeNonStreaming(req)
+            nsContent = msg.content
+            val elapsed = System.currentTimeMillis() - t0
+            val body = msg.content ?: ""
+            // ★ 判据：有期望全文 ⇒ 必须**逐字相等**（少聚合一片都不放过）；否则退回「非空」。
+            val ok = if (expect != null) body == expect else body.isNotBlank()
+            logNonStream(
+                "nonstream-answer",
+                ok,
+                (if (ok) "✅ 非流式入口拿到完整回答" else "❌ 非流式入口没有拿到完整回答") +
+                    " | 判据=$criterion" +
+                    " | finish_reason=${msg.finishReason ?: "(null)"}" +
+                    " | 正文长度=${body.length}" +
+                    " | tool_calls=${msg.toolCalls.size}" +
+                    " | 用量=" +
+                    (msg.usage?.let { "prompt=${it.promptTokens} completion=${it.completionTokens} total=${it.totalTokens}" }
+                        ?: "无") +
+                    " | ${elapsed}ms" +
+                    (if (ok) {
+                        ""
+                    } else if (expect != null) {
+                        " | ★ 与期望全文**逐字不等** ⇒ 内容不完整（例如只聚合到了部分分片）"
+                    } else {
+                        " | ★ 空正文 = 「没崩但没聚合出内容」⇒ 不算跑通"
+                    }),
+            )
+            checks += CheckItem(
+                title = "非流式入口拿到完整回答",
+                detail = "正文长度=${body.length} · finish_reason=${msg.finishReason ?: "(null)"}",
+                command = "(非流式入口)",
+                verdict = if (ok) Verdict.PASS else Verdict.FAIL,
+                output = body,
+                elapsedMs = elapsed,
+            )
+        } catch (e: Throwable) {
+            // ★ 旧版（v1.1.26 及更早）在这里就是 `JsonDecodingException` ⇒ 这一行就是判据。
+            logNonStream(
+                "nonstream-answer",
+                false,
+                "❌ 非流式入口失败：${e.javaClass.simpleName}: ${e.message}" +
+                    " | 判据=$criterion",
+            )
+            checks += CheckItem(
+                title = "非流式入口拿到完整回答",
+                detail = "${e.javaClass.simpleName}: ${e.message}",
+                command = "(非流式入口)",
+                verdict = Verdict.FAIL,
+                output = e.stackTraceToString().take(500),
+                elapsedMs = System.currentTimeMillis() - t0,
+            )
+        }
+
+        // ---- ② 对照组：默认路径（流式）同场景仍正常（**独立于①**）----
+        val t1 = System.currentTimeMillis()
+        var streamContent: String? = null
+        try {
+            val msg = client.complete(req)
+            val elapsed = System.currentTimeMillis() - t1
+            val body = msg.content ?: ""
+            streamContent = body
+            val same = nsContent != null && nsContent == body
+            val ok = body.isNotBlank()
+            logNonStream(
+                "stream-default",
+                ok,
+                (if (ok) "✅ 默认路径（流式）同场景仍正常" else "❌ 默认路径拿到空正文") +
+                    " | finish_reason=${msg.finishReason ?: "(null)"}" +
+                    " | 正文长度=${body.length}" +
+                    " | 与非流式内容一致=$same（一致性由下一项单独判）" +
+                    " | ${elapsed}ms",
+            )
+            checks += CheckItem(
+                title = "默认路径（流式）同场景仍正常",
+                detail = "正文长度=${body.length} · 与非流式内容一致=$same",
+                command = "(默认流式路径)",
+                verdict = if (ok) Verdict.PASS else Verdict.FAIL,
+                output = body,
+                elapsedMs = elapsed,
+            )
+        } catch (e: Throwable) {
+            logNonStream(
+                "stream-default",
+                false,
+                "❌ 默认路径失败：${e.javaClass.simpleName}: ${e.message}",
+            )
+            checks += CheckItem(
+                title = "默认路径（流式）同场景仍正常",
+                detail = "${e.javaClass.simpleName}: ${e.message}",
+                command = "(默认流式路径)",
+                verdict = Verdict.FAIL,
+                output = e.stackTraceToString().take(500),
+                elapsedMs = System.currentTimeMillis() - t1,
+            )
+        }
+
+        // ---- ③ 两条路径的正文逐字一致（**单独判**）----
+        val ns = nsContent
+        val st = streamContent
+        val same = ns != null && st != null && ns == st
+        logNonStream(
+            "stream-same-content",
+            same,
+            if (same) {
+                "✅ 两条路径的正文逐字一致 | 长度=${ns?.length}" +
+                    (if (expect != null) " | 与期望全文也一致=${ns == expect}" else "")
+            } else {
+                "❌ 两条路径的正文不一致" +
+                    " | 非流式长度=${ns?.length ?: "无"} · 流式长度=${st?.length ?: "无"}" +
+                    " | ⚠️ 「一致地错」（两条都只聚合到部分分片）也会在这里现形"
+            },
+        )
+        checks += CheckItem(
+            title = "两条路径的正文逐字一致",
+            detail = "非流式长度=${ns?.length ?: "无"} · 流式长度=${st?.length ?: "无"}",
+            command = "(两条路径比对)",
+            verdict = if (same) Verdict.PASS else Verdict.FAIL,
+            output = "非流式=${ns ?: "(无)"} ／ 流式=${st ?: "(无)"}",
+            elapsedMs = 0,
+        )
+    }
+
+    /**
      * 命令行触发的**多轮**对话（自动化用）。
      *
      * ## 为什么必须有多轮
@@ -2133,6 +2342,16 @@ private fun logPatch(name: String, ok: Boolean, detail: String) {
 private fun logCred(name: String, ok: Boolean, detail: String) {
     val body = if (ok) "OK | $detail" else "FAIL:$detail"
     android.util.Log.i("AgentSdkDemo", "CRED|$name=$body")
+}
+
+/**
+ * 非流式入口自检的一行日志 —— **机器可读**：`NONSTREAM|名字=OK` / `NONSTREAM|名字=FAIL:原因`。
+ *
+ * 与 [logPatch] / [logCred] 同形但**前缀不同** ⇒ 脚本能只抓非流式那一组。
+ */
+private fun logNonStream(name: String, ok: Boolean, detail: String) {
+    val body = if (ok) "OK | $detail" else "FAIL:$detail"
+    android.util.Log.i("AgentSdkDemo", "NONSTREAM|$name=$body")
 }
 
 /** 这段字节里有没有 [needle]（自检扫「磁盘上有没有明文」用）。 */

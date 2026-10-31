@@ -99,10 +99,14 @@ android-agent-sdk/
 ├── cipher-contract-test/     凭据加密核心的契约测试（源码公开，默认不参与构建）
 ├── agent-sdk-demo/           宿主示例 App（Kotlin + Compose）
 ├── bootstrap/README.md       可选的 Termux 运行时说明（载荷为独立资产，不进本仓库）
+├── 功能清单.md                能力与边界的逐条清单（接入前评估用）
 ├── 接入指南.md
 ├── 凭据加密模块规格.md
 └── 打包说明.md
 ```
+
+> 需要逐条核对「能做什么、不能做什么」时看 [功能清单.md](功能清单.md)；
+> 需要按步骤接入时看 [接入指南.md](接入指南.md)。
 
 ---
 

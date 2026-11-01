@@ -67,6 +67,25 @@ class AndroidCommandExecutor(
      * 模型看不见清单就不会用这些命令。
      */
     val capabilities: DeviceCapabilityRegistry? = null,
+    /**
+     * shell 命令黑名单（**默认空 = 行为完全不变**）。
+     *
+     * 命中就**不起进程**，直接抛 `CapabilityFailure`（内核会把它变成模型能看到的错误）。
+     * 能力命令（`termux-*` / `agent-*`）走的是进程内执行，**不受这里影响** ——
+     * 它们本来就不经过 shell。
+     *
+     * 典型用法（App 端要求「联网只走受控通道」时）：
+     * ```
+     * AndroidCommandExecutor.forContext(
+     *     context, caps,
+     *     shellPolicy = ShellCommandPolicy(
+     *         deniedCommands = setOf("curl", "wget", "nc", "ssh", "scp", "socat"),
+     *         denyHint = "联网请用 agent-http-get / agent-http-post。",
+     *     ),
+     * )
+     * ```
+     */
+    private val shellPolicy: ShellCommandPolicy = ShellCommandPolicy(),
 ) : CommandExecutor {
 
     // 环境变量统一由 PrefixEnvironment 产出（对齐 TermuxShellEnvironment），
@@ -128,11 +147,13 @@ class AndroidCommandExecutor(
             context: Context,
             capabilities: DeviceCapabilityRegistry,
             shellPath: String = DEFAULT_SHELL,
+            shellPolicy: ShellCommandPolicy = ShellCommandPolicy(),
         ): AndroidCommandExecutor =
             AndroidCommandExecutor(
                 shellPath = shellPath,
                 layout = PrefixLayout(context.filesDir.path),
                 capabilities = capabilities,
+                shellPolicy = shellPolicy,
             )
     }
 
@@ -151,6 +172,10 @@ class AndroidCommandExecutor(
                 )
             }
         }
+
+        // ①' shell 命令黑名单：命中就**连 shell 都不起**（能力命令在上面已经返回，不受影响）。
+        //    放在能力改写之前判**原始命令行** —— 改写后里面塞的是 printf，认不出原来的命令。
+        shellPolicy.check(trimmed)
 
         // ② 复合命令里夹着能力调用 → 能力先跑，结果经**环境变量**交给 shell 打印。
         //    （最终执行的是 shell 内建的 printf，所以照样绕开 noexec，

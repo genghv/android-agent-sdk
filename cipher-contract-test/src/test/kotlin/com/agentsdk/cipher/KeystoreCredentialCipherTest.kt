@@ -114,14 +114,16 @@ class KeystoreCredentialCipherTest {
         val plain = "sk-secret".toByteArray()
         val sealed = c.seal(plain, aad)
 
-        // 头：magic(4) + 版本(1) + nonce 长度(1) ⇒ nonce 从第 6 字节开始
+        // 头：magic(4) + 格式版本(1) + nonce 长度(1) + 实现版本(1) ⇒ nonce 从第 7 字节开始
         assertEquals("ASDC", String(sealed, 0, 4, Charsets.ISO_8859_1), "magic 不对")
-        assertEquals(1, sealed[4].toInt(), "版本号的位置/值不对")
+        assertEquals(2, sealed[4].toInt(), "格式版本的位置/值不对（v2 起是 2）")
         assertEquals(12, sealed[5].toInt(), "nonce 长度字段的位置/值不对")
+        // v2 新增：实现版本位（参与 AEAD 认证，改了包就解不开）
+        assertTrue(sealed[6].toInt() >= 2, "实现版本位应在第 6 字节且 >= 2")
 
-        // nonce 占 12 字节，密文从第 18 字节开始
-        val nonce = sealed.copyOfRange(6, 18)
-        val body = sealed.copyOfRange(18, sealed.size)
+        // nonce 占 12 字节，密文从第 19 字节开始
+        val nonce = sealed.copyOfRange(7, 19)
+        val body = sealed.copyOfRange(19, sealed.size)
 
         // ★ 最直接的偏移证据：密文体长度必须 = 明文 + GCM 标签(16 字节)。
         //   头部长度若写成「含 nonce 的 18」，body 就会少 12 字节 ⇒ 这条立刻红。
@@ -165,8 +167,8 @@ class KeystoreCredentialCipherTest {
         val c = cipher()
         val sealed = sealedWithHealthyBaseline(c)
         val tampered = sealed.copyOf()
-        // magic(4) + 版本(1) + nonce 长度(1) ⇒ nonce 从第 6 字节开始
-        tampered[6] = (tampered[6] + 1).toByte()
+        // magic(4) + 格式版本(1) + nonce 长度(1) + 实现版本(1) ⇒ nonce 从第 7 字节开始
+        tampered[7] = (tampered[7] + 1).toByte()
         assertFailsWith<CredentialException> { c.open(tampered, aad) }
     }
 

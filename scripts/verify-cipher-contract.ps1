@@ -8,12 +8,12 @@
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts/verify-cipher-contract.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts/verify-cipher-contract.ps1 -Tag v1.1.18
-#   powershell -ExecutionPolicy Bypass -File scripts/verify-cipher-contract.ps1 -Asset android-agent-sdk-cipher-v1.0.0-20261029.aar
+#   powershell -ExecutionPolicy Bypass -File scripts/verify-cipher-contract.ps1 -Asset android-agent-sdk-cipher-v1.1.0-20261101.aar
 #
 # 退出码：0 = 通过；1 = 不通过；2 = 不可判（环境/网络问题，**不是**「通过」）。
 param(
     [string]$Tag = '',
-    [string]$Asset = 'android-agent-sdk-cipher-v1.0.0-20261029.aar',
+    [string]$Asset = 'android-agent-sdk-cipher-v1.1.0-20261101.aar',
     [int]$ExpectedCases = 12,
     [string]$Token = ''
 )

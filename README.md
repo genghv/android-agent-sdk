@@ -229,7 +229,7 @@ val auth = store.authFor("deepseek", "https://api.deepseek.com/v1")
 ### 加密核心的分发方式
 
 凭据加密核心（Android Keystore 包裹 + AES-256-GCM）以**预编译产物**分发：
-独立资产 `android-agent-sdk-cipher-v1.0.0-*.aar`，**不随主包发布**。
+独立资产 `android-agent-sdk-cipher-v1.1.0-*.aar`，**不随主包发布**。
 
 **接口与契约完全公开**：`CredentialCipher`、`CredentialCipherLoader`、
 以及 12 条契约测试的源码都在本仓库内。实现本身不随源码发布，原因有两点：

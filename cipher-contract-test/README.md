@@ -110,5 +110,6 @@ powershell -ExecutionPolicy Bypass -File scripts/verify-cipher-contract.ps1
 | SDK 版本 | 加密产物 | 说明 |
 |---|---|---|
 | v1.1.6 | — | 接口与加载器进入开源仓 |
-| v1.1.15 起 | `android-agent-sdk-cipher-v1.0.0-20261029.aar` | 加密实现首次以独立资产发布 |
+| v1.1.15 起 | `android-agent-sdk-cipher-v1.0.0-20261029.aar` | 加密实现首次以独立资产发布（**已被 v1.1.0 取代**，仅旧资产） |
+| v1.1.31 起 | `android-agent-sdk-cipher-v1.1.0-20261101.aar` | StrongBox 优先 + 别名隔离 + 实现版本位（包格式 v2，能解 v1 旧包） |
 | v1.1.18 起 | 同上 | 契约测试源码公开（本目录） |

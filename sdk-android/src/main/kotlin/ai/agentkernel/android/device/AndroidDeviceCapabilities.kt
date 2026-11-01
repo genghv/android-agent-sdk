@@ -5,6 +5,7 @@ import ai.agentkernel.device.CapabilityFailure
 import ai.agentkernel.device.DeviceCapability
 import ai.agentkernel.device.okJson
 import ai.agentkernel.memory.AgentMemoryCapabilities
+import ai.agentkernel.prefix.PrefixLayout
 import ai.agentkernel.text.AgentTextCapabilities
 import android.app.Notification
 import android.app.NotificationChannel
@@ -22,6 +23,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import kotlinx.serialization.json.put
+import java.io.File
 
 /**
  * 设备能力的 Android 实现 —— **只做 app 自身权限就够的那批**。
@@ -306,6 +308,13 @@ fun defaultDeviceCapabilities(
     // 模型调用会拿到「缺哪个权限、怎么授」的明确报错，比"命令不存在"有用得多。
     add(LocationCapability(context))
     // —— SDK 自制的那批（`agent-` 前缀）——
+    // 技能：App 把技能下载到 agent 工作区的 usr/share/skills/，模型按需读
+    //（SDK 里**不含**任何业务技能内容；没有技能目录时 list 返回空表，不是错误）。
+    addAll(
+        AgentSkillCapabilities.forDirectory(
+            skillsDir = File(PrefixLayout(context.filesDir.path).prefix, "share/skills"),
+        ).capabilities,
+    )
     workspace?.let { addAll(it.capabilities) }
     http?.let { addAll(it.capabilities) }
     memory?.let { addAll(it.capabilities) }

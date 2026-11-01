@@ -21,6 +21,14 @@
     <!-- 通知 termux-notification（API 33+ 需要运行时授权） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+        定位 termux-location（系统 LocationManager，不依赖 GMS）。
+        宿主必须**运行时**申请其中之一；未授权时能力明确失败，不返回假坐标。
+        ⚠️ 不申请 ACCESS_BACKGROUND_LOCATION：SDK 只做前台随取随用。
+    -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
     <!-- 手电筒需要摄像头里有闪光灯；没有就别硬要，SDK 会直接回报「这台设备没有带闪光的摄像头」。 -->
     <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
 

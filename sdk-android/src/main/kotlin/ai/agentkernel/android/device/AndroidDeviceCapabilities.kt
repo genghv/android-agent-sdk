@@ -27,14 +27,17 @@ import kotlinx.serialization.json.put
  * 设备能力的 Android 实现 —— **只做 app 自身权限就够的那批**。
  *
  * 边界（用户定的）：**高级权限不给手机碰**。
- * - 这里这批（手电筒 / 震动 / 通知 / 剪贴板 / 电池）都是普通权限，不需要 su / Shizuku；
+ * - 这里这批（手电筒 / 震动 / 通知 / 剪贴板 / 电池 / 定位）都是普通权限，
+ *   不需要 su / Shizuku；定位只做**前台一次性取值**（见 [LocationCapability]），
+ *   不申请 `ACCESS_BACKGROUND_LOCATION`、不常驻监听；
  * - 装应用 / 点屏 / 改系统设置那类**不实现**，`ShizukuBridge` 保持 `Noop`；
- * - 相机 / 定位 / 短信那类要运行时授权或太敏感，**这一批先不做**。
+ * - 相机 / 短信那类要运行时授权或太敏感，**这一批先不做**。
  *
  * ## 命令名逐字对齐 Termux:API
  *
  * 能力名 = Termux:API 的命令名去掉 `termux-` 前缀，**一字不差**：
- * `torch` / `vibrate` / `notification` / `clipboard-get` / `clipboard-set` / `battery-status`。
+ * `torch` / `vibrate` / `notification` / `clipboard-get` / `clipboard-set` /
+ * `battery-status` / `location`。
  *
  * 为什么要对齐：模型是按 Termux:API 的习惯写命令的。若把剪贴板合并成一个
  * `clipboard` 能力，模型写 `termux-clipboard-set` 时会落空 —— 它按 shell 去找这个
@@ -299,6 +302,9 @@ fun defaultDeviceCapabilities(
     add(ClipboardGetCapability(context))
     add(ClipboardSetCapability(context))
     add(BatteryCapability(context))
+    // 定位：系统 LocationManager（不引 GMS）。没授权限时**照常注册** ——
+    // 模型调用会拿到「缺哪个权限、怎么授」的明确报错，比"命令不存在"有用得多。
+    add(LocationCapability(context))
     // —— SDK 自制的那批（`agent-` 前缀）——
     workspace?.let { addAll(it.capabilities) }
     http?.let { addAll(it.capabilities) }

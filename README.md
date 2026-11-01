@@ -15,7 +15,7 @@ SDK 只做执行与协议，**不含界面、不含业务、不附带任何后�
 | **命令执行** | 模型下发一条 shell 命令，SDK 在设备上执行并回填结构化结果（退出码 / stdout / stderr） |
 | **真实流式** | 走 SSE 增量返回，正文与思维链分批到达；收到 `data: [DONE]` 立即结束，不等连接关闭 |
 | **工具调用** | 单一 `bash` 工具；工具定义、参数解析、分片聚合、结果回填全部内置 |
-| **设备能力** | 手电筒 / 震动 / 通知 / 剪贴板 / 电池等 15 条能力命令，进程内执行 |
+| **设备能力** | 手电筒 / 震动 / 通知 / 剪贴板 / 电池 / 定位等 16 条能力命令，进程内执行 |
 | **工作区管理** | 拟 Linux 根目录、配额、清理、定时任务 |
 | **长期记忆** | 上下文超限自动压缩；闲置归档；记忆条目可增删改查、按行打补丁 |
 | **会话归档** | 被压缩掉的对话原文落盘存档，前端可分段翻回 |
@@ -123,6 +123,7 @@ android-agent-sdk/
 | `termux-clipboard-get` | 读剪贴板 | 需 App 处于前台焦点 |
 | `termux-clipboard-set <文本>` | 写剪贴板 | — |
 | `termux-battery-status` | 电池状态 | — |
+| `termux-location [-r once\|last] [-p gps\|network\|passive] [-t 毫秒]` | 取一次坐标（超时回落最后已知位置并标 `stale`） | `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` |
 | `agent-workspace` / `agent-cleanup` / `agent-quota` | 工作区体检、清理、配额 | — |
 | `agent-schedule list\|add\|remove\|due` | 定时任务 | — |
 | `agent-http-get` / `agent-http-post` | 调宿主接口取数 | — |

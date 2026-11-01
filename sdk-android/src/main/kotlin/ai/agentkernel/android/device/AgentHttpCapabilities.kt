@@ -101,7 +101,7 @@ private fun parseHttpArgs(
                 if (idx <= 0) throw CapabilityFailure("header 要写成 `名称: 值`，收到的是「$raw」")
                 val name = raw.substring(0, idx).trim()
                 val value = raw.substring(idx + 1).trim()
-                checkHeaderName(name)
+                checkModelHeaderName(name)
                 checkHeaderValue(name, value)
                 headers += name to value
                 i += 2
@@ -142,6 +142,17 @@ private fun parseHttpArgs(
  * **提前校验**，别把 OkHttp 的原始异常抛给模型 ——
  * `Unexpected char 0x53e6 at 0 in X-Tenant value` 这种话模型看不懂，也不知道该改什么。
  */
+/** 只用于**模型输入**的 header 名校验：通用规则 + 敏感头黑名单（宿主注入的不走这里）。 */
+private fun checkModelHeaderName(name: String) {
+    if (name.lowercase() in FORBIDDEN_REQUEST_HEADERS) {
+        throw CapabilityFailure(
+            "header「$name」由宿主注入，不要自己传；" +
+                "调相对路径（如 agent-http-get /api/weather）会自动带上鉴权。",
+        )
+    }
+    checkHeaderName(name)
+}
+
 private fun checkHeaderName(name: String) {
     if (name.isEmpty()) throw CapabilityFailure("header 名字不能为空")
     val bad = name.firstOrNull { it.code !in 0x21..0x7E || it == ':' }
@@ -331,3 +342,15 @@ private class HttpPostCapability(
         }
     }
 }
+
+
+/**
+ * 模型**不许**自己设置的请求头：这些由宿主注入，模型传了只会把鉴权搞坏。
+ * （大小写不敏感比较，见 checkHeaderName。）
+ */
+internal val FORBIDDEN_REQUEST_HEADERS: Set<String> = setOf(
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+)

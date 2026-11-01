@@ -271,4 +271,22 @@ class AgentHttpCapabilityTest {
             assertFalse(it.usage.startsWith("termux-"), "内部命令不能冒充 Termux 命令：${it.usage}")
         }
     }
+
+    @Test
+    fun `模型不许自己传鉴权头（否则会把宿主 token 顶掉）`() {
+        TinyServer().use { server ->
+            val caps = AgentHttpCapabilities(baseUrl = server.baseUrl)
+            val reg = registryOf(*caps.capabilities.toTypedArray())
+
+            val result = reg.execute(
+                reg.parseWhole("agent-http-get /api/data --header \"Authorization: Bearer stolen\"")!!,
+            )
+            assertFalse(result.ok, "模型传 Authorization 必须被拒绝")
+            assertTrue(
+                result.output.contains("由宿主注入"),
+                "错误要说清「宿主注入、不用你传」：${result.output}",
+            )
+            assertTrue(server.requests.isEmpty(), "被拒绝的请求不该真的发出去")
+        }
+    }
 }
